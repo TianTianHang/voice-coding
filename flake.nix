@@ -1,0 +1,98 @@
+{
+  description = "Tauri development environment for voice-coding";
+
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
+    rust-overlay.url = "github:oxalica/rust-overlay";
+    flake-utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
+    flake-utils.lib.eachDefaultSystem (system:
+      let
+        overlays = [ (import rust-overlay) ];
+        pkgs = import nixpkgs {
+          inherit system overlays;
+        };
+        
+        rustToolchain = pkgs.rust-bin.stable.latest.default.override {
+          extensions = [ "rust-src" "rust-analyzer" "rustfmt" "clippy" ];
+        };
+        
+        buildInputs = with pkgs; [
+          # Tauri dependencies
+          webkitgtk_4_1
+          gtk3
+          gdk-pixbuf
+          cairo
+          pango
+          atk
+          at-spi2-atk
+          at-spi2-core
+          dbus
+          librsvg
+          
+          # Build tools
+          pkg-config
+          openssl
+          curl
+          jq
+          file
+          cmake
+          glib
+          
+          # Additional system libraries
+          libayatana-appindicator
+          libdrm
+          libxkbcommon
+        ];
+        
+        nativeBuildInputs = with pkgs; [
+          # Rust toolchain
+          rustToolchain
+          
+          # Node.js ecosystem
+          nodejs
+          pnpm
+          
+          # Development tools
+          pre-commit
+          
+          # Additional tools
+          git
+          wget
+        ];
+      in
+      {
+        devShells.default = pkgs.mkShell {
+          inherit buildInputs nativeBuildInputs;
+          
+          shellHook = ''
+            # Rust source path for rust-analyzer
+            export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}"
+            
+            # Add pre-commit hook
+            if [ ! -f .git/hooks/pre-commit ]; then
+              mkdir -p .git/hooks
+              echo '#!/bin/sh
+cargo clippy --all-targets --all-features -- -D warnings
+pnpm run build || exit 1
+' > .git/hooks/pre-commit
+              chmod +x .git/hooks/pre-commit
+            fi
+            
+            echo "✅ Tauri development environment ready!"
+            echo "🦀 Rust: $(rustc --version)"
+            echo "📦 Node: $(node --version)"
+            echo "🔧 pnpm: $(pnpm --version)"
+            echo ""
+            echo "Available commands:"
+            echo "  pnpm dev      - Start development server"
+            echo "  pnpm tauri    - Run Tauri commands"
+            echo "  cargo build   - Build Rust backend"
+            echo "  cargo test    - Run Rust tests"
+          '';
+        };
+      }
+    );
+}
