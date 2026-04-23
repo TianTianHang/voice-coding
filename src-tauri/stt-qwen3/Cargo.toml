@@ -1,0 +1,22 @@
+[package]
+name = "stt-qwen3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+stt-core = { path = "../stt-core" }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+symphonia = { version = "0.5", features = ["all"] }
+rustfft = "6.2"
+num-complex = "0.4"
+tokenizers = "0.22.2"
+ndarray = "0.17.2"
+ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
+once_cell = "1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+

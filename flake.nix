@@ -45,6 +45,9 @@
           libayatana-appindicator
           libdrm
           libxkbcommon
+
+          # ONNX Runtime for STT inference
+          onnxruntime
         ];
         
         nativeBuildInputs = with pkgs; [
@@ -61,6 +64,8 @@
           # Additional tools
           git
           wget
+          git-xet
+          git-lfs
         ];
       in
       {
@@ -70,6 +75,11 @@
           shellHook = ''
             # Rust source path for rust-analyzer
             export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}"
+            
+            # ONNX Runtime configuration (use Nix package, avoid runtime download)
+            export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
+            export STT_MODEL_DIR="$PWD/models"
+            export LD_LIBRARY_PATH="${pkgs.onnxruntime}/lib:$LD_LIBRARY_PATH"
             
             # Add pre-commit hook
             if [ ! -f .git/hooks/pre-commit ]; then
@@ -85,6 +95,16 @@ pnpm run build || exit 1
             echo "🦀 Rust: $(rustc --version)"
             echo "📦 Node: $(node --version)"
             echo "🔧 pnpm: $(pnpm --version)"
+            echo ""
+            echo "🧠 ONNX Runtime: ${pkgs.onnxruntime.version} (from Nix)"
+            echo "📂 STT Models: $STT_MODEL_DIR"
+            
+            if [ ! -d "$STT_MODEL_DIR/onnx_models" ]; then
+              echo ""
+              echo "⚠️  STT models not found."
+              echo "   Download with: bash scripts/download_model.sh"
+            fi
+            
             echo ""
             echo "Available commands:"
             echo "  pnpm dev      - Start development server"

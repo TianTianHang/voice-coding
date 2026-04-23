@@ -23,3 +23,8 @@ dist-ssr
 *.sln
 *.sw?
 .opencode
+
+# STT model files (~2.5GB)
+models/
+
+test_audio
