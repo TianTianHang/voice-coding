@@ -1,0 +1,214 @@
+{
+  "decoder_init.int8.onnx": {
+    "model_name": "decoder_init.int8.onnx",
+    "graph_name": "main_graph",
+    "inputs": [
+      {
+        "index": 0,
+        "name": "input_embeds",
+        "type": "FLOAT",
+        "shape": [
+          "batch",
+          "seq_len",
+          1024
+        ]
+      },
+      {
+        "index": 1,
+        "name": "position_ids",
+        "type": "INT64",
+        "shape": [
+          "batch",
+          "seq_len"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "index": 0,
+        "name": "logits",
+        "type": "FLOAT",
+        "shape": [
+          "batch",
+          "seq_len",
+          151936
+        ]
+      },
+      {
+        "index": 1,
+        "name": "present_keys",
+        "type": "FLOAT",
+        "shape": [
+          28,
+          "batch",
+          8,
+          "seq_len",
+          128
+        ]
+      },
+      {
+        "index": 2,
+        "name": "present_values",
+        "type": "FLOAT",
+        "shape": [
+          28,
+          "batch",
+          8,
+          "seq_len",
+          128
+        ]
+      }
+    ]
+  },
+  "decoder_step.int8.onnx": {
+    "model_name": "decoder_step.int8.onnx",
+    "graph_name": "main_graph",
+    "inputs": [
+      {
+        "index": 0,
+        "name": "input_embeds",
+        "type": "FLOAT",
+        "shape": [
+          "batch",
+          1,
+          1024
+        ]
+      },
+      {
+        "index": 1,
+        "name": "position_ids",
+        "type": "INT64",
+        "shape": [
+          "batch",
+          1
+        ]
+      },
+      {
+        "index": 2,
+        "name": "past_keys",
+        "type": "FLOAT",
+        "shape": [
+          28,
+          "batch",
+          8,
+          "past_seq_len",
+          128
+        ]
+      },
+      {
+        "index": 3,
+        "name": "past_values",
+        "type": "FLOAT",
+        "shape": [
+          28,
+          "batch",
+          8,
+          "past_seq_len",
+          128
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "index": 0,
+        "name": "logits",
+        "type": "FLOAT",
+        "shape": [
+          "batch",
+          1,
+          151936
+        ]
+      },
+      {
+        "index": 1,
+        "name": "present_keys",
+        "type": "FLOAT",
+        "shape": [
+          28,
+          "batch",
+          8,
+          "past_seq_len + 1",
+          128
+        ]
+      },
+      {
+        "index": 2,
+        "name": "present_values",
+        "type": "FLOAT",
+        "shape": [
+          28,
+          "batch",
+          8,
+          "past_seq_len + 1",
+          128
+        ]
+      }
+    ]
+  },
+  "encoder_conv.onnx": {
+    "model_name": "encoder_conv.onnx",
+    "graph_name": "main_graph",
+    "inputs": [
+      {
+        "index": 0,
+        "name": "padded_mel_chunks",
+        "type": "FLOAT",
+        "shape": [
+          "num_chunks",
+          1,
+          128,
+          "chunk_len"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "index": 0,
+        "name": "chunk_features",
+        "type": "FLOAT",
+        "shape": [
+          "num_chunks",
+          "(((chunk_len - 1)//8)) + 1",
+          896
+        ]
+      }
+    ]
+  },
+  "encoder_transformer.onnx": {
+    "model_name": "encoder_transformer.onnx",
+    "graph_name": "main_graph",
+    "inputs": [
+      {
+        "index": 0,
+        "name": "hidden_states",
+        "type": "FLOAT",
+        "shape": [
+          "total_tokens",
+          896
+        ]
+      },
+      {
+        "index": 1,
+        "name": "attention_mask",
+        "type": "FLOAT",
+        "shape": [
+          1,
+          1,
+          "total_tokens",
+          "total_tokens"
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "index": 0,
+        "name": "encoder_output",
+        "type": "FLOAT",
+        "shape": [
+          "total_tokens",
+          1024
+        ]
+      }
+    ]
+  }
+}

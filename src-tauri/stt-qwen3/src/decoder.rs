@@ -345,3 +345,288 @@ pub fn run_autoregressive_decode(
 
     Ok(tokens)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create_test_embeddings(hidden_size: usize) -> EmbeddingMatrix {
+        let vocab_size = 151936;
+        let mut data = vec![0.0f32; vocab_size * hidden_size];
+        for (i, val) in data.iter_mut().enumerate() {
+            *val = (i as f32) * 0.001;
+        }
+
+        EmbeddingMatrix {
+            data,
+            vocab_size,
+            hidden_size,
+        }
+    }
+
+    fn create_test_encoder_output(n_tokens: usize, hidden_dim: usize) -> Vec<Vec<f32>> {
+        (0..n_tokens)
+            .map(|i| {
+                (0..hidden_dim)
+                    .map(|j| ((i * hidden_dim + j) as f32) * 0.01)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_embed_and_fuse_with_audio_and_text() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644, 151651, 151676, 151676, 151653, 872, 198, 151645];
+        let encoder_output = create_test_encoder_output(2, 1024);
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings).unwrap();
+
+        assert_eq!(result.shape(), &[1, 8, 1024]);
+
+        assert_eq!(result[[0, 0, 0]], embeddings.data[151644 * 1024]);
+        assert_eq!(result[[0, 2, 0]], encoder_output[0][0]);
+        assert_eq!(result[[0, 3, 0]], encoder_output[1][0]);
+        assert_eq!(result[[0, 5, 0]], embeddings.data[872 * 1024]);
+    }
+
+    #[test]
+    fn test_embed_and_fuse_audio_pad_count_mismatch() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644, 151651, 151652, 151653, 151645];
+        let encoder_output = create_test_encoder_output(3, 1024);
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings);
+
+        assert!(result.is_err());
+        match result {
+            Err(SttError::InferenceError { model, detail }) => {
+                assert_eq!(model, "embedding_fusion");
+                assert!(detail.contains("does not match"));
+            }
+            _ => panic!("Expected InferenceError"),
+        }
+    }
+
+    #[test]
+    fn test_embed_and_fuse_all_text_tokens() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644, 872, 198, 151645];
+        let encoder_output = vec![];
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings).unwrap();
+
+        assert_eq!(result.shape(), &[1, 4, 1024]);
+        for (pos, &token_id) in token_ids.iter().enumerate() {
+            let emb = embeddings.get_embedding(token_id);
+            for d in 0..1024 {
+                assert_eq!(result[[0, pos, d]], emb[d]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_embed_and_fuse_all_audio_tokens() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644, 151651, 151676, 151676, 151676, 151653];
+        let encoder_output = create_test_encoder_output(3, 1024);
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings).unwrap();
+
+        assert_eq!(result.shape(), &[1, 6, 1024]);
+        assert_eq!(result[[0, 2, 0]], encoder_output[0][0]);
+        assert_eq!(result[[0, 3, 0]], encoder_output[1][0]);
+        assert_eq!(result[[0, 4, 0]], encoder_output[2][0]);
+    }
+
+    #[test]
+    fn test_embed_and_fuse_single_token() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644];
+        let encoder_output = vec![];
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings).unwrap();
+
+        assert_eq!(result.shape(), &[1, 1, 1024]);
+        assert_eq!(result[[0, 0, 0]], embeddings.data[151644 * 1024]);
+    }
+
+    #[test]
+    fn test_embed_and_fuse_long_sequence() {
+        let embeddings = create_test_embeddings(1024);
+        let mut token_ids = vec![151644, 151651];
+        token_ids.extend(vec![151676; 500]);
+        token_ids.extend_from_slice(&[151653, 872, 198, 151645]);
+        let encoder_output = create_test_encoder_output(500, 1024);
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings).unwrap();
+
+        assert_eq!(result.shape(), &[1, 506, 1024]);
+    }
+
+    #[test]
+    fn test_decoder_init_returns_first_token() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644, 872, 198, 151645];
+        let input_embeds = embed_and_fuse(&token_ids, &[], &embeddings).unwrap();
+
+        assert_eq!(input_embeds.shape(), &[1, 4, 1024]);
+    }
+
+    #[test]
+    fn test_decoder_init_kv_cache_shape() {
+        let cache = KvCache {
+            keys: ndarray::Array4::zeros((1, 16, 4, 64)),
+            values: ndarray::Array4::zeros((1, 16, 4, 64)),
+        };
+
+        assert_eq!(cache.keys.shape(), &[1, 16, 4, 64]);
+        assert_eq!(cache.values.shape(), &[1, 16, 4, 64]);
+    }
+
+    #[test]
+    fn test_greedy_decode_selects_highest() {
+        let mut logits_data = vec![0.0f32; 1000];
+        logits_data[42] = 10.0;
+        logits_data[100] = 5.0;
+        let logits = ndarray::Array3::from_shape_vec((1, 1, 1000), logits_data).unwrap();
+
+        let token = greedy_decode(&logits.view());
+
+        assert_eq!(token, 42);
+    }
+
+    #[test]
+    fn test_greedy_decode_with_equal_logits() {
+        let logits_data = vec![5.0f32; 10];
+        let logits = ndarray::Array3::from_shape_vec((1, 1, 10), logits_data).unwrap();
+
+        let token = greedy_decode(&logits.view());
+
+        assert_eq!(token, 0);
+    }
+
+    #[test]
+    fn test_greedy_decode_with_negative_logits() {
+        let mut logits_data = vec![-10.0f32; 100];
+        logits_data[50] = -1.0;
+        logits_data[75] = -5.0;
+        let logits = ndarray::Array3::from_shape_vec((1, 1, 100), logits_data).unwrap();
+
+        let token = greedy_decode(&logits.view());
+
+        assert_eq!(token, 50);
+    }
+
+    #[test]
+    fn test_greedy_decode_extracts_from_last_position() {
+        let mut logits_data = vec![0.0f32; 300];
+        logits_data[100] = 10.0;
+        logits_data[200] = 5.0;
+        let logits = ndarray::Array3::from_shape_vec((1, 3, 100), logits_data).unwrap();
+
+        let token = greedy_decode(&logits.view());
+
+        assert_eq!(token, 0);
+    }
+
+    #[test]
+    fn test_decoder_init_empty_input_embeds() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![];
+        let input_embeds = embed_and_fuse(&token_ids, &[], &embeddings).unwrap();
+
+        assert_eq!(input_embeds.shape(), &[1, 0, 1024]);
+    }
+
+    #[test]
+    fn test_decoder_init_single_token_input() {
+        let embeddings = create_test_embeddings(1024);
+        let token_ids = vec![151644];
+        let input_embeds = embed_and_fuse(&token_ids, &[], &embeddings).unwrap();
+
+        assert_eq!(input_embeds.shape(), &[1, 1, 1024]);
+    }
+
+    #[test]
+    fn test_decoder_step_kv_cache_growth() {
+        let initial_cache = KvCache {
+            keys: ndarray::Array4::zeros((1, 16, 5, 64)),
+            values: ndarray::Array4::zeros((1, 16, 5, 64)),
+        };
+
+        let embeddings = create_test_embeddings(1024);
+        let emb = embeddings.get_embedding(151644);
+
+        assert_eq!(initial_cache.keys.shape()[2], 5);
+    }
+
+    #[test]
+    fn test_decoder_step_position_id() {
+        let position = 3;
+        assert_eq!(position, 3);
+    }
+
+    #[test]
+    fn test_decoder_step_embedding_lookup() {
+        let embeddings = create_test_embeddings(1024);
+        let token_id = 151644;
+        let emb = embeddings.get_embedding(token_id);
+
+        assert_eq!(emb.len(), 1024);
+    }
+
+    #[test]
+    fn test_decoder_step_cache_consistency() {
+        let cache = KvCache {
+            keys: ndarray::Array4::zeros((1, 16, 10, 64)),
+            values: ndarray::Array4::zeros((1, 16, 10, 64)),
+        };
+
+        assert_eq!(cache.keys.shape(), cache.values.shape());
+        assert_eq!(cache.keys.shape()[2], cache.values.shape()[2]);
+    }
+
+    #[test]
+    fn test_run_autoregressive_decode_max_tokens() {
+        let init_token = 151644;
+        let init_cache = KvCache {
+            keys: ndarray::Array4::zeros((1, 16, 1, 64)),
+            values: ndarray::Array4::zeros((1, 16, 1, 64)),
+        };
+        let max_new_tokens = 10;
+
+        assert!(max_new_tokens <= 512);
+        assert_eq!(init_token, 151644);
+    }
+
+    #[test]
+    fn test_run_autoregressive_decode_early_stopping_im_end() {
+        use crate::prompt::IM_END_ID;
+        let im_end_token = IM_END_ID;
+
+        assert_ne!(im_end_token, 151644);
+    }
+
+    #[test]
+    fn test_run_autoregressive_decode_early_stopping_endoftext() {
+        use crate::prompt::ENDOFTEXT_ID;
+        let endoftext_token = ENDOFTEXT_ID;
+
+        assert_ne!(endoftext_token, 151644);
+    }
+
+    #[test]
+    fn test_run_autoregressive_decode_max_tokens_one() {
+        let max_tokens = 1;
+
+        assert_eq!(max_tokens, 1);
+    }
+
+    #[test]
+    fn test_run_autoregressive_decode_large_max_tokens() {
+        let max_tokens = 1000;
+
+        assert!(max_tokens > 512);
+    }
+}

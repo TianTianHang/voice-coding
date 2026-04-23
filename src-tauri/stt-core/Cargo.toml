@@ -7,3 +7,4 @@ edition = "2021"
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+ndarray = "0.17.2"

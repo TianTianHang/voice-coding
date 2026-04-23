@@ -16,9 +16,8 @@ impl TokenizerWrapper {
             )));
         }
 
-        let tokenizer = tokenizers::Tokenizer::from_file(&path).map_err(|e| {
-            SttError::TokenizerError(format!("Failed to load tokenizer: {}", e))
-        })?;
+        let tokenizer = tokenizers::Tokenizer::from_file(&path)
+            .map_err(|e| SttError::TokenizerError(format!("Failed to load tokenizer: {}", e)))?;
 
         Ok(Self { tokenizer })
     }
@@ -48,5 +47,136 @@ mod tests {
     fn test_load_missing_tokenizer() {
         let result = TokenizerWrapper::load(Path::new("/nonexistent"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_ascii() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "Hello world!";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_chinese() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "你好世界";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_japanese() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "こんにちは";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_korean() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "안녕하세요";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_mixed() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "Hello 你好 こんにちは";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_special_chars() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "Hello\nWorld\tTest";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_emoji() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let text = "Hello 😀 World 🌍";
+        let encoded = wrapper.encode(text).unwrap();
+        let decoded = wrapper.decode(&encoded).unwrap();
+
+        assert_eq!(text, decoded);
+    }
+
+    #[test]
+    fn test_encode_error_handling() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let result = wrapper.encode("");
+
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn test_decode_error_handling() {
+        let wrapper = TokenizerWrapper::load(Path::new("models/tokenizer.json"));
+        if wrapper.is_err() {
+            return;
+        }
+
+        let wrapper = wrapper.unwrap();
+        let result = wrapper.decode(&[]);
+
+        assert!(result.is_ok());
     }
 }

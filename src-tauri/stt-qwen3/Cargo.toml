@@ -18,5 +18,8 @@ ort = { version = "=2.0.0-rc.12", features = ["load-dynamic"] }
 once_cell = "1"
 
 [dev-dependencies]
+mockall = "0.14.0"
+proptest = "1.11.0"
+stt-core = { path = "../stt-core" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 

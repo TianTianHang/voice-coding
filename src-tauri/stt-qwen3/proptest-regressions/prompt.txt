@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 9c2a9ece25da9d3c6a488f12a451821277ef5ec58f2d01fe1070debea6ecb4a9 # shrinks to n_audio_tokens = 0
