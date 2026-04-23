@@ -81,11 +81,13 @@ impl Qwen3AsrEngine {
         };
 
         let max_tokens = config.max_new_tokens.unwrap_or(512);
+        let seq_len = input_embeds.shape()[1];
         let generated_tokens = {
             let mut sessions = self.sessions.lock().unwrap();
             run_autoregressive_decode(
                 init_token,
                 cache,
+                seq_len,
                 max_tokens,
                 &mut sessions,
                 &self.embeddings,

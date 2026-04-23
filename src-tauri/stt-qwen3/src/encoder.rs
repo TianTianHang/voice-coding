@@ -231,7 +231,7 @@ mod tests {
 
         assert_eq!(chunks.len(), lengths.len());
 
-        for (i, chunk) in chunks.iter().enumerate() {
+        for (_i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk[0].len(), CHUNK_SIZE);
         }
 

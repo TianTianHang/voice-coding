@@ -321,6 +321,7 @@ fn greedy_decode(logits: &ndarray::ArrayView3<f32>) -> u32 {
 pub fn run_autoregressive_decode(
     init_token: u32,
     init_cache: KvCache,
+    seq_len: usize,
     max_new_tokens: usize,
     sessions: &mut crate::models::session::OnnxSessions,
     embeddings: &EmbeddingMatrix,
@@ -329,11 +330,12 @@ pub fn run_autoregressive_decode(
 
     let mut tokens = vec![init_token];
     let mut cache = init_cache;
+    let mut cur_pos = seq_len;
 
-    for position in 0..max_new_tokens {
+    for _ in 0..max_new_tokens {
         let (next_token, new_cache) = decoder_step(
             *tokens.last().unwrap(),
-            position,
+            cur_pos,
             &cache,
             embeddings,
             sessions,
@@ -345,6 +347,7 @@ pub fn run_autoregressive_decode(
 
         tokens.push(next_token);
         cache = new_cache;
+        cur_pos += 1;
     }
 
     Ok(tokens)
@@ -560,7 +563,7 @@ mod tests {
         };
 
         let embeddings = create_test_embeddings(1024);
-        let emb = embeddings.get_embedding(151644);
+        let _emb = embeddings.get_embedding(151644);
 
         assert_eq!(initial_cache.keys.shape()[3], 5);
     }
@@ -594,7 +597,7 @@ mod tests {
     #[test]
     fn test_run_autoregressive_decode_max_tokens() {
         let init_token = 151644;
-        let init_cache = KvCache {
+        let _init_cache = KvCache {
             keys: ndarray::Array5::zeros((28, 1, 8, 1, 128)),
             values: ndarray::Array5::zeros((28, 1, 8, 1, 128)),
         };

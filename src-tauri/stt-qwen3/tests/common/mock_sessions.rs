@@ -1,4 +1,4 @@
-use ndarray::{Array2, Array3, Array4};
+use ndarray::{Array2, Array3, Array5};
 use stt_core::{KvCache, Result, SessionManager, SttError};
 
 #[derive(Debug, Clone)]
@@ -27,8 +27,8 @@ impl MockSessionManager {
     pub fn with_decoder_init_output(
         mut self,
         token: u32,
-        keys: Array4<f32>,
-        values: Array4<f32>,
+        keys: Array5<f32>,
+        values: Array5<f32>,
     ) -> Self {
         self.decoder_init_output = Some((token, (keys, values)));
         self
@@ -37,8 +37,8 @@ impl MockSessionManager {
     pub fn with_decoder_step_output(
         mut self,
         token: u32,
-        keys: Array4<f32>,
-        values: Array4<f32>,
+        keys: Array5<f32>,
+        values: Array5<f32>,
     ) -> Self {
         self.decoder_step_output = Some((token, (keys, values)));
         self
@@ -60,19 +60,20 @@ impl MockSessionManager {
     }
 
     pub fn default_cache(
+        num_layers: usize,
         batch: usize,
         num_heads: usize,
         seq_len: usize,
         head_dim: usize,
     ) -> KvCache {
-        let keys = Array4::from_shape_vec(
-            (batch, num_heads, seq_len, head_dim),
-            vec![0.0f32; batch * num_heads * seq_len * head_dim],
+        let keys = Array5::from_shape_vec(
+            (num_layers, batch, num_heads, seq_len, head_dim),
+            vec![0.0f32; num_layers * batch * num_heads * seq_len * head_dim],
         )
         .unwrap();
-        let values = Array4::from_shape_vec(
-            (batch, num_heads, seq_len, head_dim),
-            vec![0.0f32; batch * num_heads * seq_len * head_dim],
+        let values = Array5::from_shape_vec(
+            (num_layers, batch, num_heads, seq_len, head_dim),
+            vec![0.0f32; num_layers * batch * num_heads * seq_len * head_dim],
         )
         .unwrap();
         (keys, values)
@@ -113,7 +114,7 @@ impl SessionManager for MockSessionManager {
         }
 
         Ok(self.decoder_init_output.clone().unwrap_or_else(|| {
-            let cache = Self::default_cache(1, 16, 1, 64);
+            let cache = Self::default_cache(28, 1, 8, 1, 128);
             (151644, cache)
         }))
     }
@@ -122,8 +123,8 @@ impl SessionManager for MockSessionManager {
         &mut self,
         _input_embeds: &Array3<f32>,
         _position_ids: &Array2<i64>,
-        _past_keys: &Array4<f32>,
-        _past_values: &Array4<f32>,
+        _past_keys: &Array5<f32>,
+        _past_values: &Array5<f32>,
     ) -> Result<(u32, KvCache), SttError> {
         if self.should_fail {
             return Err(SttError::InferenceError {
@@ -133,7 +134,7 @@ impl SessionManager for MockSessionManager {
         }
 
         Ok(self.decoder_step_output.clone().unwrap_or_else(|| {
-            let cache = Self::default_cache(1, 16, 2, 64);
+            let cache = Self::default_cache(28, 1, 8, 2, 128);
             (151645, cache)
         }))
     }

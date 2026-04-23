@@ -31,7 +31,8 @@ pub fn compute_stft(samples: &[f32]) -> Vec<Vec<num_complex::Complex64>> {
         let start = frame_idx * HOP_LENGTH;
         let _end = (start + N_FFT).min(samples.len());
 
-        let mut fft_input: Vec<num_complex::Complex64> = vec![num_complex::Complex64::new(0.0, 0.0); N_FFT];
+        let mut fft_input: Vec<num_complex::Complex64> =
+            vec![num_complex::Complex64::new(0.0, 0.0); N_FFT];
         for i in 0..N_FFT {
             let sample_idx = start + i;
             let sample = if sample_idx < samples.len() {
@@ -124,18 +125,17 @@ pub fn apply_mel_filterbank(
 
 pub fn log_compression(mel_spec: &mut [Vec<f64>]) {
     let mut max_val = f64::NEG_INFINITY;
-    for row in mel_spec.iter() {
-        for &v in row.iter() {
-            let log_v = v.max(1e-10).log10();
-            if log_v > max_val {
-                max_val = log_v;
+    for row in mel_spec.iter_mut() {
+        for v in row.iter_mut() {
+            *v = v.max(1e-10).log10();
+            if *v > max_val {
+                max_val = *v;
             }
         }
     }
 
     for row in mel_spec.iter_mut() {
         for v in row.iter_mut() {
-            *v = v.max(1e-10).log10();
             *v = v.max(max_val - 8.0);
             *v = (*v + 4.0) / 4.0;
         }
