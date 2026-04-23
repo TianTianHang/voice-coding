@@ -51,8 +51,8 @@ pub fn embed_and_fuse(
 }
 
 pub struct KvCache {
-    pub keys: ndarray::Array4<f32>,
-    pub values: ndarray::Array4<f32>,
+    pub keys: ndarray::Array5<f32>,
+    pub values: ndarray::Array5<f32>,
 }
 
 pub fn decoder_init(
@@ -60,7 +60,7 @@ pub fn decoder_init(
     sessions: &mut crate::models::session::OnnxSessions,
 ) -> Result<(u32, KvCache), SttError> {
     let seq_len = input_embeds.shape()[1];
-    let position_ids_data: Vec<f32> = (0..seq_len).map(|i| i as f32).collect();
+    let position_ids_data: Vec<i64> = (0..seq_len).map(|i| i as i64).collect();
     let position_ids =
         ndarray::Array2::from_shape_vec((1, seq_len), position_ids_data).map_err(|e| {
             SttError::InferenceError {
@@ -83,9 +83,9 @@ pub fn decoder_init(
 
     let outputs = sessions
         .decoder_init
-        .run(vec![
-            ("input_embeds", input_embeds_value),
-            ("position_ids", position_ids_value),
+        .run(ort::inputs![
+            "input_embeds" => input_embeds_value,
+            "position_ids" => position_ids_value
         ])
         .map_err(|e| SttError::InferenceError {
             model: "decoder_init".into(),
@@ -136,12 +136,13 @@ pub fn decoder_init(
             })?;
 
     let cache = KvCache {
-        keys: ndarray::Array4::from_shape_vec(
+        keys: ndarray::Array5::from_shape_vec(
             (
                 keys_shape[0] as usize,
                 keys_shape[1] as usize,
                 keys_shape[2] as usize,
                 keys_shape[3] as usize,
+                keys_shape[4] as usize,
             ),
             keys_data.to_vec(),
         )
@@ -149,12 +150,13 @@ pub fn decoder_init(
             model: "decoder_init".into(),
             detail: format!("Failed to reshape keys: {}", e),
         })?,
-        values: ndarray::Array4::from_shape_vec(
+        values: ndarray::Array5::from_shape_vec(
             (
                 values_shape[0] as usize,
                 values_shape[1] as usize,
                 values_shape[2] as usize,
                 values_shape[3] as usize,
+                values_shape[4] as usize,
             ),
             values_data.to_vec(),
         )
@@ -184,7 +186,7 @@ pub fn decoder_step(
         })?;
 
     let position_ids =
-        ndarray::Array2::from_shape_vec((1, 1), vec![position as f32]).map_err(|e| {
+        ndarray::Array2::from_shape_vec((1, 1), vec![position as i64]).map_err(|e| {
             SttError::InferenceError {
                 model: "decoder_step".into(),
                 detail: format!("Failed to create position_ids: {}", e),
@@ -215,11 +217,11 @@ pub fn decoder_step(
 
     let outputs = sessions
         .decoder_step
-        .run(vec![
-            ("input_embeds", input_embeds_value),
-            ("position_ids", position_ids_value),
-            ("past_keys", past_keys_value),
-            ("past_values", past_values_value),
+        .run(ort::inputs![
+            "input_embeds" => input_embeds_value,
+            "position_ids" => position_ids_value,
+            "past_keys" => past_keys_value,
+            "past_values" => past_values_value
         ])
         .map_err(|e| SttError::InferenceError {
             model: "decoder_step".into(),
@@ -270,12 +272,13 @@ pub fn decoder_step(
             })?;
 
     let new_cache = KvCache {
-        keys: ndarray::Array4::from_shape_vec(
+        keys: ndarray::Array5::from_shape_vec(
             (
                 keys_shape[0] as usize,
                 keys_shape[1] as usize,
                 keys_shape[2] as usize,
                 keys_shape[3] as usize,
+                keys_shape[4] as usize,
             ),
             keys_data.to_vec(),
         )
@@ -283,12 +286,13 @@ pub fn decoder_step(
             model: "decoder_step".into(),
             detail: format!("Failed to reshape keys: {}", e),
         })?,
-        values: ndarray::Array4::from_shape_vec(
+        values: ndarray::Array5::from_shape_vec(
             (
                 values_shape[0] as usize,
                 values_shape[1] as usize,
                 values_shape[2] as usize,
                 values_shape[3] as usize,
+                values_shape[4] as usize,
             ),
             values_data.to_vec(),
         )
@@ -476,12 +480,12 @@ mod tests {
     #[test]
     fn test_decoder_init_kv_cache_shape() {
         let cache = KvCache {
-            keys: ndarray::Array4::zeros((1, 16, 4, 64)),
-            values: ndarray::Array4::zeros((1, 16, 4, 64)),
+            keys: ndarray::Array5::zeros((28, 1, 8, 4, 128)),
+            values: ndarray::Array5::zeros((28, 1, 8, 4, 128)),
         };
 
-        assert_eq!(cache.keys.shape(), &[1, 16, 4, 64]);
-        assert_eq!(cache.values.shape(), &[1, 16, 4, 64]);
+        assert_eq!(cache.keys.shape(), &[28, 1, 8, 4, 128]);
+        assert_eq!(cache.values.shape(), &[28, 1, 8, 4, 128]);
     }
 
     #[test]
@@ -551,14 +555,14 @@ mod tests {
     #[test]
     fn test_decoder_step_kv_cache_growth() {
         let initial_cache = KvCache {
-            keys: ndarray::Array4::zeros((1, 16, 5, 64)),
-            values: ndarray::Array4::zeros((1, 16, 5, 64)),
+            keys: ndarray::Array5::zeros((28, 1, 8, 5, 128)),
+            values: ndarray::Array5::zeros((28, 1, 8, 5, 128)),
         };
 
         let embeddings = create_test_embeddings(1024);
         let emb = embeddings.get_embedding(151644);
 
-        assert_eq!(initial_cache.keys.shape()[2], 5);
+        assert_eq!(initial_cache.keys.shape()[3], 5);
     }
 
     #[test]
@@ -579,20 +583,20 @@ mod tests {
     #[test]
     fn test_decoder_step_cache_consistency() {
         let cache = KvCache {
-            keys: ndarray::Array4::zeros((1, 16, 10, 64)),
-            values: ndarray::Array4::zeros((1, 16, 10, 64)),
+            keys: ndarray::Array5::zeros((28, 1, 8, 10, 128)),
+            values: ndarray::Array5::zeros((28, 1, 8, 10, 128)),
         };
 
         assert_eq!(cache.keys.shape(), cache.values.shape());
-        assert_eq!(cache.keys.shape()[2], cache.values.shape()[2]);
+        assert_eq!(cache.keys.shape()[3], cache.values.shape()[3]);
     }
 
     #[test]
     fn test_run_autoregressive_decode_max_tokens() {
         let init_token = 151644;
         let init_cache = KvCache {
-            keys: ndarray::Array4::zeros((1, 16, 1, 64)),
-            values: ndarray::Array4::zeros((1, 16, 1, 64)),
+            keys: ndarray::Array5::zeros((28, 1, 8, 1, 128)),
+            values: ndarray::Array5::zeros((28, 1, 8, 1, 128)),
         };
         let max_new_tokens = 10;
 

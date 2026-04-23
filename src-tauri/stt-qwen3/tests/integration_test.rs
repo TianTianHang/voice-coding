@@ -7,7 +7,7 @@ async fn test_stt_qwen3() -> Result<(), Box<dyn std::error::Error>> {
     println!("🎙️  STT Engine Integration Test");
     println!("==============================\n");
 
-    let model_dir = std::env::var("STT_MODEL_DIR").unwrap_or_else(|_| "models".to_string());
+    let model_dir = "../../models";
     
     println!("📂 Loading STT engine from: {}", model_dir);
     let engine = stt_qwen3::Qwen3AsrEngine::new(&model_dir)?;

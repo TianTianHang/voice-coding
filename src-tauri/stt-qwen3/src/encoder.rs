@@ -78,7 +78,7 @@ pub fn run_encoder(
 
     let outputs = sessions
         .encoder_conv
-        .run(vec![("padded_mel_chunks", input_value)])
+        .run(ort::inputs!["padded_mel_chunks" => input_value])
         .map_err(|e| SttError::InferenceError {
             model: "encoder_conv".into(),
             detail: format!("Inference failed: {}", e),
@@ -148,9 +148,9 @@ pub fn run_encoder(
 
     let transformer_outputs = sessions
         .encoder_transformer
-        .run(vec![
-            ("hidden_states", hidden_value),
-            ("attention_mask", mask_value),
+        .run(ort::inputs![
+            "hidden_states" => hidden_value,
+            "attention_mask" => mask_value
         ])
         .map_err(|e| SttError::InferenceError {
             model: "encoder_transformer".into(),
