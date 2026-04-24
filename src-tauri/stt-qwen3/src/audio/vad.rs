@@ -32,10 +32,7 @@ pub fn detect_silence(db_values: &[f64], threshold: f64) -> Vec<bool> {
     db_values.iter().map(|&db| db < threshold).collect()
 }
 
-pub fn find_split_points(
-    samples: &[f32],
-    target_chunk_sec: f64,
-) -> Vec<usize> {
+pub fn find_split_points(samples: &[f32], target_chunk_sec: f64) -> Vec<usize> {
     let duration = samples.len() as f64 / SAMPLE_RATE as f64;
     if duration < MIN_DURATION_FOR_CHUNKING_SEC {
         return Vec::new();
@@ -65,7 +62,12 @@ pub fn find_split_points(
         let mut best_silence_db = f64::INFINITY;
         let target_frame = (current_pos + target_samples) / hop;
 
-        for (frame_idx, &is_silent) in silence_mask.iter().enumerate().take(frame_search_end.min(silence_mask.len())).skip(frame_search_start) {
+        for (frame_idx, &is_silent) in silence_mask
+            .iter()
+            .enumerate()
+            .take(frame_search_end.min(silence_mask.len()))
+            .skip(frame_search_start)
+        {
             if is_silent {
                 let dist = (frame_idx as i64 - target_frame as i64).abs() as f64;
                 if dist < best_silence_db {

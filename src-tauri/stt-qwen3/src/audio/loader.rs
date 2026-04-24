@@ -41,9 +41,7 @@ pub fn load_audio_from_file(path: &str) -> Result<Vec<f32>, SttError> {
 
     let probed = symphonia::default::get_probe()
         .format(&hint, mss, &format_opts, &metadata_opts)
-        .map_err(|e| {
-            SttError::AudioLoadError(format!("Failed to probe audio format: {:?}", e))
-        })?;
+        .map_err(|e| SttError::AudioLoadError(format!("Failed to probe audio format: {:?}", e)))?;
 
     let mut reader = probed.format;
 
@@ -56,16 +54,11 @@ pub fn load_audio_from_file(path: &str) -> Result<Vec<f32>, SttError> {
     let track_id = track.id;
     let codec_params = &track.codec_params;
     let sample_rate = codec_params.sample_rate.unwrap_or(TARGET_SAMPLE_RATE);
-    let channels = codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1usize);
+    let channels = codec_params.channels.map(|c| c.count()).unwrap_or(1usize);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(codec_params, &decoder_opts)
-        .map_err(|e| {
-            SttError::AudioLoadError(format!("Failed to create decoder: {:?}", e))
-        })?;
+        .map_err(|e| SttError::AudioLoadError(format!("Failed to create decoder: {:?}", e)))?;
 
     let mut all_samples: Vec<f32> = Vec::new();
 
@@ -81,10 +74,7 @@ pub fn load_audio_from_file(path: &str) -> Result<Vec<f32>, SttError> {
                     }
                     Err(SymphoniaError::DecodeError(_)) => continue,
                     Err(e) => {
-                        return Err(SttError::AudioLoadError(format!(
-                            "Decode error: {:?}",
-                            e
-                        )));
+                        return Err(SttError::AudioLoadError(format!("Decode error: {:?}", e)));
                     }
                 }
             }
@@ -94,10 +84,7 @@ pub fn load_audio_from_file(path: &str) -> Result<Vec<f32>, SttError> {
                 break;
             }
             Err(e) => {
-                return Err(SttError::AudioLoadError(format!(
-                    "Read error: {:?}",
-                    e
-                )));
+                return Err(SttError::AudioLoadError(format!("Read error: {:?}", e)));
             }
         }
     }
@@ -113,10 +100,7 @@ pub fn load_audio_from_file(path: &str) -> Result<Vec<f32>, SttError> {
 
 pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
     let cursor = Cursor::new(data.to_vec());
-    let mss = symphonia::core::io::MediaSourceStream::new(
-        Box::new(cursor),
-        Default::default(),
-    );
+    let mss = symphonia::core::io::MediaSourceStream::new(Box::new(cursor), Default::default());
 
     let format_opts = FormatOptions {
         enable_gapless: true,
@@ -128,10 +112,7 @@ pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
     let probed = symphonia::default::get_probe()
         .format(&Hint::new(), mss, &format_opts, &metadata_opts)
         .map_err(|e| {
-            SttError::AudioLoadError(format!(
-                "Failed to probe audio from bytes: {:?}",
-                e
-            ))
+            SttError::AudioLoadError(format!("Failed to probe audio from bytes: {:?}", e))
         })?;
 
     let mut reader = probed.format;
@@ -147,16 +128,11 @@ pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
     let track_id = track.id;
     let codec_params = &track.codec_params;
     let sample_rate = codec_params.sample_rate.unwrap_or(TARGET_SAMPLE_RATE);
-    let channels = codec_params
-        .channels
-        .map(|c| c.count())
-        .unwrap_or(1usize);
+    let channels = codec_params.channels.map(|c| c.count()).unwrap_or(1usize);
 
     let mut decoder = symphonia::default::get_codecs()
         .make(codec_params, &decoder_opts)
-        .map_err(|e| {
-            SttError::AudioLoadError(format!("Failed to create decoder: {:?}", e))
-        })?;
+        .map_err(|e| SttError::AudioLoadError(format!("Failed to create decoder: {:?}", e)))?;
 
     let mut all_samples: Vec<f32> = Vec::new();
 
@@ -172,10 +148,7 @@ pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
                     }
                     Err(SymphoniaError::DecodeError(_)) => continue,
                     Err(e) => {
-                        return Err(SttError::AudioLoadError(format!(
-                            "Decode error: {:?}",
-                            e
-                        )));
+                        return Err(SttError::AudioLoadError(format!("Decode error: {:?}", e)));
                     }
                 }
             }
@@ -185,10 +158,7 @@ pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
                 break;
             }
             Err(e) => {
-                return Err(SttError::AudioLoadError(format!(
-                    "Read error: {:?}",
-                    e
-                )));
+                return Err(SttError::AudioLoadError(format!("Read error: {:?}", e)));
             }
         }
     }
@@ -207,7 +177,12 @@ fn append_samples(decoded: &AudioBufferRef, channels: usize, output: &mut Vec<f3
 
     match decoded {
         AudioBufferRef::U8(buf) => {
-            let samples: Vec<f32> = buf.as_ref().chan(0).iter().map(|&s| s as f32 / 255.0).collect();
+            let samples: Vec<f32> = buf
+                .as_ref()
+                .chan(0)
+                .iter()
+                .map(|&s| s as f32 / 255.0)
+                .collect();
             if channels > 1 {
                 downmix_interleaved(&samples, channels, output);
             } else {
@@ -215,7 +190,12 @@ fn append_samples(decoded: &AudioBufferRef, channels: usize, output: &mut Vec<f3
             }
         }
         AudioBufferRef::S16(buf) => {
-            let samples: Vec<f32> = buf.as_ref().chan(0).iter().map(|&s| s as f32 / 32768.0).collect();
+            let samples: Vec<f32> = buf
+                .as_ref()
+                .chan(0)
+                .iter()
+                .map(|&s| s as f32 / 32768.0)
+                .collect();
             if channels > 1 {
                 downmix_interleaved(&samples, channels, output);
             } else {
@@ -223,10 +203,15 @@ fn append_samples(decoded: &AudioBufferRef, channels: usize, output: &mut Vec<f3
             }
         }
         AudioBufferRef::S24(buf) => {
-            let samples: Vec<f32> = buf.as_ref().chan(0).iter().map(|&s| {
-                let si24: i32 = unsafe { std::mem::transmute(s) };
-                si24 as f32 / (1 << 23) as f32
-            }).collect();
+            let samples: Vec<f32> = buf
+                .as_ref()
+                .chan(0)
+                .iter()
+                .map(|&s| {
+                    let si24: i32 = unsafe { std::mem::transmute(s) };
+                    si24 as f32 / (1 << 23) as f32
+                })
+                .collect();
             if channels > 1 {
                 downmix_interleaved(&samples, channels, output);
             } else {
@@ -234,7 +219,12 @@ fn append_samples(decoded: &AudioBufferRef, channels: usize, output: &mut Vec<f3
             }
         }
         AudioBufferRef::S32(buf) => {
-            let samples: Vec<f32> = buf.as_ref().chan(0).iter().map(|&s| s as f32 / 2147483648.0).collect();
+            let samples: Vec<f32> = buf
+                .as_ref()
+                .chan(0)
+                .iter()
+                .map(|&s| s as f32 / 2147483648.0)
+                .collect();
             if channels > 1 {
                 downmix_interleaved(&samples, channels, output);
             } else {
@@ -296,9 +286,7 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32
 
 pub fn validate_samples(samples: &[f32], sample_rate: u32) -> Result<(), SttError> {
     if samples.is_empty() {
-        return Err(SttError::AudioLoadError(
-            "Audio contains no samples".into(),
-        ));
+        return Err(SttError::AudioLoadError("Audio contains no samples".into()));
     }
 
     let duration = samples.len() as f64 / sample_rate as f64;

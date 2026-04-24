@@ -54,6 +54,12 @@
           gst_all_1.gst-plugins-base
           gst_all_1.gst-plugins-good
           gst_all_1.gst-plugins-bad
+
+          # ALSA for cpal audio input
+          alsa-lib
+
+          # LLVM C++ libraries for ten-vad
+          libcxx
         ];
         
         nativeBuildInputs = with pkgs; [
@@ -86,6 +92,9 @@
             export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
             export STT_MODEL_DIR="$PWD/models"
             export LD_LIBRARY_PATH="${pkgs.onnxruntime}/lib:$LD_LIBRARY_PATH"
+            
+            # LLVM C++ libraries for ten-vad
+            export LD_LIBRARY_PATH="${pkgs.libcxx}/lib:$LD_LIBRARY_PATH"
             
             # Add pre-commit hook
             if [ ! -f .git/hooks/pre-commit ]; then

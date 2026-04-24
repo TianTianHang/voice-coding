@@ -1,27 +1,27 @@
-use stt_core::{AudioInput, SttConfig, SttEngine};
-#[cfg(feature = "stt-qwen3")]
-use stt_qwen3::Qwen3AsrEngine;
 #[cfg(feature = "stt-qwen3")]
 use once_cell::sync::Lazy;
 use std::io::Write;
+use stt_core::{AudioInput, SttConfig, SttEngine};
+#[cfg(feature = "stt-qwen3")]
+use stt_qwen3::Qwen3AsrEngine;
 
 #[cfg(feature = "stt-qwen3")]
 static STT_ENGINE: Lazy<Qwen3AsrEngine> = Lazy::new(|| {
-    let model_dir = std::env::var("STT_MODEL_DIR")
-        .unwrap_or_else(|_| "models".to_string());
-    Qwen3AsrEngine::new(&model_dir)
-        .expect("Failed to initialize STT engine")
+    let model_dir = std::env::var("STT_MODEL_DIR").unwrap_or_else(|_| "models".to_string());
+    Qwen3AsrEngine::new(&model_dir).expect("Failed to initialize STT engine")
 });
+
+#[cfg(feature = "stt-qwen3")]
+pub fn get_stt_engine() -> &'static Qwen3AsrEngine {
+    &STT_ENGINE
+}
 
 fn temp_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("voice-coding")
 }
 
 #[tauri::command]
-pub async fn transcribe(
-    audio_path: String,
-    language: Option<String>,
-) -> Result<String, String> {
+pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
         let input = AudioInput::FilePath(audio_path);
@@ -30,7 +30,8 @@ pub async fn transcribe(
             ..Default::default()
         };
 
-        let result = (*STT_ENGINE).transcribe(input, config)
+        let result = (*STT_ENGINE)
+            .transcribe(input, config)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -69,7 +70,8 @@ pub async fn transcribe_audio_data(
             ..Default::default()
         };
 
-        let result = (*STT_ENGINE).transcribe(input, config)
+        let result = (*STT_ENGINE)
+            .transcribe(input, config)
             .await
             .map_err(|e| e.to_string())?;
 

@@ -1,74 +1,25 @@
-import { useCallback, useRef } from "react";
-import { useVAD } from "../hooks/useVAD";
-import { encodeWAV } from "../hooks/useAudioRecorder";
-import { useTranscription } from "../hooks/useTranscription";
+import { useRef } from "react";
+import { useBackendVAD } from "../hooks/useBackendVAD";
 import { AudioVisualizer } from "./AudioVisualizer";
 import { TranscriptDisplay } from "./TranscriptDisplay";
 import { ControlButton } from "./ControlButton";
-import type { VADState } from "../hooks/useVAD";
-
-const MIN_RECORDING_SAMPLES = 8000;
 
 export function VoiceRecorder() {
   const transcriptHistoryRef = useRef<string[]>([]);
-  const lastStateRef = useRef<VADState>("idle");
 
-  const {
-    text: transcriptText,
-    isLoading,
-    error: transcriptError,
-    transcribe,
-    reset: resetTranscription,
-  } = useTranscription();
+  const { state, transcript, error, recordingDuration, startListening, stopListening } =
+    useBackendVAD();
 
-  const handleStateChange = useCallback((newState: VADState) => {
-    if (newState === "idle" && lastStateRef.current === "processing") {
-      resetTranscription();
-    }
-    lastStateRef.current = newState;
-  }, [resetTranscription]);
+  if (transcript && transcript !== transcriptHistoryRef.current[transcriptHistoryRef.current.length - 1]) {
+    transcriptHistoryRef.current = [...transcriptHistoryRef.current, transcript];
+  }
 
-  const handleRecordingStop = useCallback(
-    async (audioData: Int16Array) => {
-      if (audioData.length < MIN_RECORDING_SAMPLES) {
-        resetTranscription();
-        return;
-      }
+  const displayText = transcript || transcriptHistoryRef.current.join("\n");
 
-      const wavData = encodeWAV(audioData, 16000);
-      const result = await transcribe(wavData);
-      if (result) {
-        transcriptHistoryRef.current = [
-          ...transcriptHistoryRef.current,
-          result,
-        ];
-      }
-    },
-    [transcribe, resetTranscription]
-  );
-
-  const handleRecordingStart = useCallback(() => {
-    resetTranscription();
-  }, [resetTranscription]);
-
-  const handleError = useCallback((error: string) => {
-    console.error("VAD Error:", error);
-  }, []);
-
-  const { state, error: vadError, startListening, stopListening, recordingDuration } = useVAD({
-    onRecordingStart: handleRecordingStart,
-    onRecordingStop: handleRecordingStop,
-    onStateChange: handleStateChange,
-    onError: handleError,
-  });
-
-  const displayError = vadError || (state === "idle" && lastStateRef.current !== "idle" ? null : null);
-  const displayText = transcriptText || transcriptHistoryRef.current.join("\n");
-
-  const errorGuidance = displayError
-    ? displayError.includes("denied") || displayError.includes("NotAllowedError")
-      ? `${displayError} — Please grant microphone permission in your system settings and try again.`
-      : displayError
+  const errorGuidance = error
+    ? error.includes("denied") || error.includes("NotAllowedError")
+      ? `${error} — Please grant microphone permission in your system settings and try again.`
+      : error
     : null;
 
   return (
@@ -90,7 +41,7 @@ export function VoiceRecorder() {
         <AudioVisualizer state={state} recordingDuration={recordingDuration} />
       </div>
 
-      {isLoading && (
+      {state === "processing" && (
         <div style={{ textAlign: "center", padding: 8, color: "#f39c12" }}>
           Transcribing audio...
         </div>
@@ -102,7 +53,7 @@ export function VoiceRecorder() {
         </div>
       )}
 
-      <TranscriptDisplay text={displayText} error={transcriptError} />
+      <TranscriptDisplay text={displayText} error={null} />
     </div>
   );
 }

@@ -6,13 +6,11 @@ pub mod prompt;
 pub mod tokenizer;
 
 use std::path::Path;
-use std::time::Instant;
 use std::sync::Mutex;
+use std::time::Instant;
 
 use async_trait::async_trait;
-use stt_core::{
-    AudioInput, SttConfig, SttEngine, SttError, SttResult, TimingInfo,
-};
+use stt_core::{AudioInput, SttConfig, SttEngine, SttError, SttResult, TimingInfo};
 
 use audio::loader;
 use audio::mel::{compute_mel_spectrogram, create_mel_filterbank};
@@ -24,9 +22,8 @@ use prompt::build_prompt_ids;
 use tokenizer::wrapper::TokenizerWrapper;
 
 const SUPPORTED_LANGUAGES: &[&str] = &[
-    "zh", "en", "yue", "ja", "ko", "ar", "de", "fr", "es", "pt",
-    "id", "it", "ru", "th", "vi", "tr", "hi", "ms", "nl", "sv",
-    "da", "fi", "pl", "cz", "fil", "fa", "el", "ro", "hu", "mk",
+    "zh", "en", "yue", "ja", "ko", "ar", "de", "fr", "es", "pt", "id", "it", "ru", "th", "vi",
+    "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cz", "fil", "fa", "el", "ro", "hu", "mk",
 ];
 
 pub struct Qwen3AsrEngine {
@@ -54,7 +51,11 @@ impl Qwen3AsrEngine {
         })
     }
 
-    fn transcribe_samples(&self, samples: &[f32], config: &SttConfig) -> Result<SttResult, SttError> {
+    fn transcribe_samples(
+        &self,
+        samples: &[f32],
+        config: &SttConfig,
+    ) -> Result<SttResult, SttError> {
         let start = Instant::now();
         let audio_duration = samples.len() as f64 / 16000.0;
 
@@ -67,11 +68,8 @@ impl Qwen3AsrEngine {
 
         let n_audio_tokens = encoder_output.len();
 
-        let prompt_ids = build_prompt_ids(
-            n_audio_tokens,
-            config.language.as_deref(),
-            &self.tokenizer,
-        )?;
+        let prompt_ids =
+            build_prompt_ids(n_audio_tokens, config.language.as_deref(), &self.tokenizer)?;
 
         let input_embeds = embed_and_fuse(&prompt_ids, &encoder_output, &self.embeddings)?;
 
@@ -101,7 +99,10 @@ impl Qwen3AsrEngine {
 
         Ok(SttResult {
             text,
-            language: config.language.clone().unwrap_or_else(|| "auto".to_string()),
+            language: config
+                .language
+                .clone()
+                .unwrap_or_else(|| "auto".to_string()),
             confidence: None,
             timing: TimingInfo {
                 audio_duration_sec: audio_duration,
@@ -123,7 +124,11 @@ impl SttEngine for Qwen3AsrEngine {
         SUPPORTED_LANGUAGES
     }
 
-    async fn transcribe(&self, input: AudioInput, config: SttConfig) -> Result<SttResult, SttError> {
+    async fn transcribe(
+        &self,
+        input: AudioInput,
+        config: SttConfig,
+    ) -> Result<SttResult, SttError> {
         if let Some(ref lang) = config.language {
             if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
                 return Err(SttError::UnsupportedLanguage(lang.clone()));
@@ -136,8 +141,9 @@ impl SttEngine for Qwen3AsrEngine {
             AudioInput::Samples(data, rate) => {
                 let mut s = data;
                 if rate != 16000 {
-                    s = loader::resample(&s, rate, 16000)
-                        .map_err(|e| SttError::AudioLoadError(format!("Resampling failed: {:?}", e)))?;
+                    s = loader::resample(&s, rate, 16000).map_err(|e| {
+                        SttError::AudioLoadError(format!("Resampling failed: {:?}", e))
+                    })?;
                 }
                 loader::validate_samples(&s, 16000)?;
                 s
@@ -167,7 +173,10 @@ impl SttEngine for Qwen3AsrEngine {
 
             Ok(SttResult {
                 text: full_text,
-                language: config.language.clone().unwrap_or_else(|| "auto".to_string()),
+                language: config
+                    .language
+                    .clone()
+                    .unwrap_or_else(|| "auto".to_string()),
                 confidence: None,
                 timing: TimingInfo {
                     audio_duration_sec: duration,

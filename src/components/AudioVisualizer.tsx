@@ -1,5 +1,5 @@
 import type { CSSProperties } from "react";
-import type { VADState } from "../hooks/useVAD";
+import type { VADState } from "../hooks/useBackendVAD";
 
 interface AudioVisualizerProps {
   state: VADState;

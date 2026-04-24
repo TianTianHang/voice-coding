@@ -25,7 +25,7 @@ fn create_mock_samples(duration_sec: usize, sample_rate: u32) -> Vec<f32> {
 #[tokio::test]
 async fn test_minimum_duration_boundary() {
     let engine = setup_test_engine().await;
-    let samples = create_mock_samples(2, 16000);  // 增加到2秒
+    let samples = create_mock_samples(2, 16000); // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
@@ -54,7 +54,7 @@ async fn test_empty_samples() {
 #[tokio::test]
 async fn test_silence_only_audio() {
     let engine = setup_test_engine().await;
-    let samples = vec![0.0f32; 32000];  // 增加到2秒
+    let samples = vec![0.0f32; 32000]; // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
@@ -74,7 +74,7 @@ async fn test_extreme_low_sample_rate() {
 #[tokio::test]
 async fn test_extreme_high_sample_rate() {
     let engine = setup_test_engine().await;
-    let samples = create_mock_samples(2, 96000);  // 增加到2秒
+    let samples = create_mock_samples(2, 96000); // 增加到2秒
     let input = AudioInput::Samples(samples, 96000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
@@ -84,7 +84,7 @@ async fn test_extreme_high_sample_rate() {
 #[tokio::test]
 async fn test_clipping_audio() {
     let engine = setup_test_engine().await;
-    let samples = vec![2.0f32; 32000];  // 增加到2秒
+    let samples = vec![2.0f32; 32000]; // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
@@ -94,7 +94,7 @@ async fn test_clipping_audio() {
 #[tokio::test]
 async fn test_negative_amplitude_audio() {
     let engine = setup_test_engine().await;
-    let samples = vec![-1.5f32; 32000];  // 增加到2秒
+    let samples = vec![-1.5f32; 32000]; // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
@@ -104,7 +104,7 @@ async fn test_negative_amplitude_audio() {
 #[tokio::test]
 async fn test_very_large_max_tokens() {
     let engine = setup_test_engine().await;
-    let samples = create_mock_samples(2, 16000);  // 增加到2秒
+    let samples = create_mock_samples(2, 16000); // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
     let config = SttConfig {
         max_new_tokens: Some(10000),
@@ -120,7 +120,7 @@ async fn test_very_large_max_tokens() {
 #[tokio::test]
 async fn test_long_audio_handling() {
     let engine = setup_test_engine().await;
-    
+
     let samples: Vec<f32> = (0..300_000)
         .map(|i| {
             let freq = 440.0 + (i as f32 / 300_000.0) * 100.0;
@@ -128,7 +128,7 @@ async fn test_long_audio_handling() {
             phase.sin() * 0.5
         })
         .collect();
-    
+
     let input = AudioInput::Samples(samples, 16000);
     let config = SttConfig {
         enable_vad: true,
@@ -175,7 +175,7 @@ async fn test_vad_with_very_large_chunk() {
 #[tokio::test]
 async fn test_zero_max_tokens() {
     let engine = setup_test_engine().await;
-    let samples = create_mock_samples(2, 16000);  // 增加到2秒
+    let samples = create_mock_samples(2, 16000); // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
     let config = SttConfig {
         max_new_tokens: Some(0),
@@ -199,7 +199,7 @@ async fn test_single_sample() {
 #[tokio::test]
 async fn test_very_short_duration() {
     let engine = setup_test_engine().await;
-    let samples = create_mock_samples(2, 16000);  // 增加到2秒
+    let samples = create_mock_samples(2, 16000); // 增加到2秒
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;

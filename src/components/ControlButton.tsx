@@ -1,4 +1,4 @@
-import type { VADState } from "../hooks/useVAD";
+import type { VADState } from "../hooks/useBackendVAD";
 
 interface ControlButtonProps {
   state: VADState;

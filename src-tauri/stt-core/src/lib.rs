@@ -4,10 +4,7 @@ pub enum SttError {
     AudioLoadError(String),
 
     #[error("Inference error in {model}: {detail}")]
-    InferenceError {
-        model: String,
-        detail: String,
-    },
+    InferenceError { model: String, detail: String },
 
     #[error("Tokenizer error: {0}")]
     TokenizerError(String),
@@ -111,11 +108,7 @@ pub trait SttEngine: Send + Sync {
         results
     }
 
-    async fn transcribe_stream(
-        &self,
-        _input: AudioInput,
-        _config: SttConfig,
-    ) -> Result<SttResult> {
+    async fn transcribe_stream(&self, _input: AudioInput, _config: SttConfig) -> Result<SttResult> {
         Err(SttError::NotImplemented(
             "Streaming transcription is not supported by this engine".into(),
         ))
