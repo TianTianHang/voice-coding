@@ -7,7 +7,7 @@ export function TranscriptDisplay({ text, error }: TranscriptDisplayProps) {
   if (error) {
     return (
       <div style={{ padding: 16, backgroundColor: "#ffeaea", borderRadius: 8, color: "#c0392b" }}>
-        Transcription error: {error}
+        {error}
       </div>
     );
   }

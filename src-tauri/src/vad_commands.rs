@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use parking_lot::Mutex;
@@ -9,14 +10,42 @@ use stt_core::SttEngine;
 
 pub struct VadRecorderState {
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
+    active_session: Arc<Mutex<Option<u64>>>,
+    starting: Arc<Mutex<bool>>,
+    next_session_id: AtomicU64,
 }
 
 impl VadRecorderState {
     pub fn new() -> Self {
         Self {
             recorder: Arc::new(Mutex::new(None)),
+            active_session: Arc::new(Mutex::new(None)),
+            starting: Arc::new(Mutex::new(false)),
+            next_session_id: AtomicU64::new(1),
         }
     }
+
+    fn allocate_session_id(&self) -> u64 {
+        self.next_session_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn set_active_session(&self, session_id: u64) {
+        let mut guard = self.active_session.lock();
+        *guard = Some(session_id);
+    }
+
+    fn clear_active_session(&self) -> Option<u64> {
+        let mut guard = self.active_session.lock();
+        guard.take()
+    }
+
+    fn current_active_session(&self) -> Option<u64> {
+        *self.active_session.lock()
+    }
+}
+
+fn is_session_active(active_session: &Arc<Mutex<Option<u64>>>, session_id: u64) -> bool {
+    *active_session.lock() == Some(session_id)
 }
 
 fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
@@ -134,20 +163,46 @@ pub async fn start_listening(
 ) -> Result<(), String> {
     {
         let recorder = state.recorder.lock();
-        if recorder.is_some() {
+        let starting = state.starting.lock();
+        if recorder.is_some() || *starting {
             return Err("Already listening".into());
         }
     }
 
+    {
+        let mut starting = state.starting.lock();
+        if *starting {
+            return Err("Already listening".into());
+        }
+        *starting = true;
+    }
+
+    let session_id = state.allocate_session_id();
+    state.set_active_session(session_id);
+
     let lib_path = get_vad_lib_path(&app)?;
-    let recorder = AudioRecorder::new(&lib_path).map_err(|e| e.to_string())?;
+    let recorder = match AudioRecorder::new(&lib_path) {
+        Ok(recorder) => recorder,
+        Err(err) => {
+            state.clear_active_session();
+            let mut starting = state.starting.lock();
+            *starting = false;
+            return Err(err.to_string());
+        }
+    };
 
     let sm = recorder.state_machine();
     let event_rx = recorder.event_rx();
+    let active_session = state.active_session.clone();
 
     {
         let mut guard = state.recorder.lock();
         *guard = Some(recorder);
+    }
+
+    {
+        let mut starting = state.starting.lock();
+        *starting = false;
     }
 
     let app_clone = app.clone();
@@ -155,27 +210,47 @@ pub async fn start_listening(
         while let Ok(event) = event_rx.recv() {
             match event {
                 crate::vad::VadEvent::StateChanged(s) => {
-                    let _ =
-                        app_clone.emit("vad-state", serde_json::json!({ "state": s.to_string() }));
+                    if is_session_active(&active_session, session_id) {
+                        let _ = app_clone.emit(
+                            "vad-state",
+                            serde_json::json!({ "state": s.to_string(), "sessionId": session_id }),
+                        );
+                    }
                 }
                 crate::vad::VadEvent::SpeechDetected(audio_data) => {
                     let wav = encode_wav(&audio_data, SAMPLE_RATE);
                     match transcribe_audio_internal(app_clone.clone(), wav).await {
                         Ok(text) => {
-                            let _ =
-                                app_clone.emit("transcript", serde_json::json!({ "text": text }));
+                            if is_session_active(&active_session, session_id) {
+                                let _ = app_clone.emit(
+                                    "transcript",
+                                    serde_json::json!({ "text": text, "sessionId": session_id }),
+                                );
+                            }
                         }
                         Err(e) => {
-                            let _ = app_clone.emit("error", &e);
+                            if is_session_active(&active_session, session_id) {
+                                let _ = app_clone.emit(
+                                    "error",
+                                    serde_json::json!({ "message": e, "sessionId": session_id }),
+                                );
+                            }
                         }
                     }
-                    let mut sm_guard = sm.lock();
-                    sm_guard.finish_transcription();
+                    if is_session_active(&active_session, session_id) {
+                        let mut sm_guard = sm.lock();
+                        sm_guard.finish_transcription();
+                    }
                 }
                 crate::vad::VadEvent::Error(msg) => {
-                    let _ = app_clone.emit("error", &msg);
-                    let mut sm_guard = sm.lock();
-                    sm_guard.stop();
+                    if is_session_active(&active_session, session_id) {
+                        let _ = app_clone.emit(
+                            "error",
+                            serde_json::json!({ "message": msg, "sessionId": session_id }),
+                        );
+                        let mut sm_guard = sm.lock();
+                        sm_guard.stop();
+                    }
                 }
             }
         }
@@ -194,18 +269,40 @@ pub async fn start_listening(
 }
 
 #[tauri::command]
-pub fn stop_listening(state: tauri::State<'_, VadRecorderState>) -> Result<(), String> {
+pub fn stop_listening(
+    app: AppHandle,
+    state: tauri::State<'_, VadRecorderState>,
+) -> Result<(), String> {
+    let stopped_session = state.clear_active_session();
+
     let mut guard = state.recorder.lock();
     if let Some(recorder) = guard.take() {
         let sm = recorder.state_machine();
         let mut sm = sm.lock();
         sm.stop();
     }
+
+    if let Some(session_id) = stopped_session {
+        let _ = app.emit(
+            "vad-state",
+            serde_json::json!({ "state": VadState::Idle.to_string(), "sessionId": session_id }),
+        );
+    }
+
+    {
+        let mut starting = state.starting.lock();
+        *starting = false;
+    }
+
     Ok(())
 }
 
 #[tauri::command]
 pub fn get_vad_state(state: tauri::State<'_, VadRecorderState>) -> Result<String, String> {
+    if state.current_active_session().is_none() {
+        return Ok(VadState::Idle.to_string());
+    }
+
     let guard = state.recorder.lock();
     match guard.as_ref() {
         Some(recorder) => {

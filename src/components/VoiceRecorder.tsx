@@ -1,20 +1,17 @@
-import { useRef } from "react";
 import { useBackendVAD } from "../hooks/useBackendVAD";
 import { AudioVisualizer } from "./AudioVisualizer";
 import { TranscriptDisplay } from "./TranscriptDisplay";
 import { ControlButton } from "./ControlButton";
 
 export function VoiceRecorder() {
-  const transcriptHistoryRef = useRef<string[]>([]);
-
-  const { state, transcript, error, recordingDuration, startListening, stopListening } =
-    useBackendVAD();
-
-  if (transcript && transcript !== transcriptHistoryRef.current[transcriptHistoryRef.current.length - 1]) {
-    transcriptHistoryRef.current = [...transcriptHistoryRef.current, transcript];
-  }
-
-  const displayText = transcript || transcriptHistoryRef.current.join("\n");
+  const {
+    state,
+    transcript,
+    error,
+    recordingDuration,
+    startListening,
+    stopListening,
+  } = useBackendVAD();
 
   const errorGuidance = error
     ? error.includes("denied") || error.includes("NotAllowedError")
@@ -47,13 +44,7 @@ export function VoiceRecorder() {
         </div>
       )}
 
-      {errorGuidance && (
-        <div style={{ padding: 12, backgroundColor: "#ffeaea", borderRadius: 8, color: "#c0392b", marginBottom: 12 }}>
-          {errorGuidance}
-        </div>
-      )}
-
-      <TranscriptDisplay text={displayText} error={null} />
+      <TranscriptDisplay text={transcript} error={errorGuidance} />
     </div>
   );
 }

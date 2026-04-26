@@ -39,6 +39,41 @@ pub struct VadStateMachine {
     event_tx: Sender<VadEvent>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{VadEvent, VadState, VadStateMachine};
+    use crossbeam_channel::unbounded;
+
+    #[test]
+    fn stop_resets_state_from_recording() {
+        let (tx, _rx) = unbounded();
+        let mut sm = VadStateMachine::new(tx);
+
+        sm.start();
+        sm.process_frame(&[1; 256], true);
+        assert_eq!(sm.get_state(), VadState::Recording);
+
+        sm.stop();
+        assert_eq!(sm.get_state(), VadState::Idle);
+    }
+
+    #[test]
+    fn finish_transcription_returns_to_idle() {
+        let (tx, rx) = unbounded();
+        let mut sm = VadStateMachine::new(tx);
+
+        sm.start();
+        sm.process_frame(&[1; 256], true);
+        sm.finish_transcription();
+
+        assert_eq!(sm.get_state(), VadState::Idle);
+        let events: Vec<VadEvent> = rx.try_iter().collect();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, VadEvent::StateChanged(VadState::Idle))));
+    }
+}
+
 impl VadStateMachine {
     pub fn new(event_tx: Sender<VadEvent>) -> Self {
         Self {

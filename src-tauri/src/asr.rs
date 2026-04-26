@@ -1,6 +1,7 @@
 #[cfg(feature = "stt-qwen3")]
 use once_cell::sync::Lazy;
 use std::io::Write;
+use std::path::Path;
 use stt_core::{AudioInput, SttConfig, SttEngine};
 #[cfg(feature = "stt-qwen3")]
 use stt_qwen3::Qwen3AsrEngine;
@@ -18,6 +19,18 @@ pub fn get_stt_engine() -> &'static Qwen3AsrEngine {
 
 fn temp_dir() -> std::path::PathBuf {
     std::env::temp_dir().join("voice-coding")
+}
+
+fn cleanup_temp_audio_file(file_path: &Path) -> Result<(), String> {
+    match std::fs::remove_file(file_path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!(
+            "Failed to remove temp file {}: {}",
+            file_path.display(),
+            e
+        )),
+    }
 }
 
 #[tauri::command]
@@ -70,19 +83,47 @@ pub async fn transcribe_audio_data(
             ..Default::default()
         };
 
-        let result = (*STT_ENGINE)
+        let transcription_result = (*STT_ENGINE)
             .transcribe(input, config)
             .await
-            .map_err(|e| e.to_string())?;
+            .map(|result| result.text)
+            .map_err(|e| e.to_string());
 
-        let _ = std::fs::remove_file(&file_path);
+        let cleanup_result = cleanup_temp_audio_file(&file_path);
 
-        Ok(result.text)
+        match (transcription_result, cleanup_result) {
+            (Ok(text), Ok(())) => Ok(text),
+            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
+            (Err(transcription_err), _) => Err(transcription_err),
+        }
     }
 
     #[cfg(not(feature = "stt-qwen3"))]
     {
         let _ = (audio_data, language);
         Err("STT engine not available: no engine feature enabled".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cleanup_temp_audio_file;
+
+    #[test]
+    fn cleanup_temp_audio_file_removes_existing_file() {
+        let temp_file = std::env::temp_dir().join(format!("voice-coding-test-{}.wav", uuid::Uuid::new_v4()));
+        std::fs::write(&temp_file, b"wav").expect("failed to create temp file");
+
+        let result = cleanup_temp_audio_file(&temp_file);
+        assert!(result.is_ok());
+        assert!(!temp_file.exists());
+    }
+
+    #[test]
+    fn cleanup_temp_audio_file_ignores_missing_file() {
+        let temp_file = std::env::temp_dir().join(format!("voice-coding-test-missing-{}.wav", uuid::Uuid::new_v4()));
+
+        let result = cleanup_temp_audio_file(&temp_file);
+        assert!(result.is_ok());
     }
 }

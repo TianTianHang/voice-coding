@@ -120,9 +120,15 @@ python scripts/verify_onnx_inputs.py
 - `src-tauri/stt-qwen3/` - Qwen3 ASR implementation
 
 ### Key Events (Frontend ← Backend)
-- `vad-state` - VAD state changes (idle/listening/recording/processing)
-- `transcript` - Transcribed text result
-- `error` - Error messages
+- `vad-state` - VAD state updates with `{ state, sessionId }`; frontend should treat backend events as source of truth
+- `transcript` - Session-scoped transcript event `{ text, sessionId }`; ignore stale session events
+- `error` - Session-scoped error event `{ message, sessionId }` for unified UI error handling
+
+### Session Ownership and Cleanup
+- Backend owns recording session identity and lifecycle boundaries.
+- `stop_listening` invalidates the active session before returning so late results can be dropped safely.
+- Frontend should not force idle state locally; it should wait for backend `vad-state` events.
+- Temporary audio files in `transcribe_audio_data` must be cleaned up on both success and failure paths.
 
 ## Environment Variables
 - `STT_MODEL_DIR` - Path to model files (default: `./models`)

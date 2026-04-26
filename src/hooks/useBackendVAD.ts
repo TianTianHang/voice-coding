@@ -8,71 +8,172 @@ export interface BackendVADResult {
   state: VADState;
   transcript: string;
   error: string | null;
+  activeSessionId: number | null;
   recordingDuration: number;
   startListening: () => Promise<void>;
   stopListening: () => Promise<void>;
 }
 
+type VadStateEventPayload = {
+  state: VADState;
+  sessionId?: number;
+};
+
+type TranscriptEventPayload = {
+  text: string;
+  sessionId?: number;
+};
+
+type ErrorEventPayload = {
+  message: string;
+  sessionId?: number;
+};
+
 export function useBackendVAD(): BackendVADResult {
   const [state, setState] = useState<VADState>("idle");
   const [transcript, setTranscript] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
+  const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const durationRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const activeSessionIdRef = useRef<number | null>(null);
+  const isMountedRef = useRef(true);
+  const awaitingNewSessionRef = useRef(false);
+
+  const stopDurationTimer = useCallback(() => {
+    if (durationRef.current) {
+      clearInterval(durationRef.current);
+      durationRef.current = null;
+    }
+    setRecordingDuration(0);
+  }, []);
+
+  const setSession = useCallback((sessionId: number | null) => {
+    activeSessionIdRef.current = sessionId;
+    setActiveSessionId(sessionId);
+  }, []);
 
   useEffect(() => {
-    const unlisteners: (() => void)[] = [];
+    isMountedRef.current = true;
+    let disposed = false;
+    let unlisteners: Array<() => void> = [];
 
     async function setup() {
-      unlisteners.push(
-        await listen<{ state: string }>("vad-state", (event) => {
-          const newState = event.payload.state as VADState;
+      const listeners = await Promise.all([
+        listen<VadStateEventPayload>("vad-state", (event) => {
+          if (!isMountedRef.current) {
+            return;
+          }
+
+          const { state: newState, sessionId } = event.payload;
+
+          if (typeof sessionId === "number") {
+            if (newState === "idle") {
+              if (
+                activeSessionIdRef.current !== null &&
+                activeSessionIdRef.current !== sessionId
+              ) {
+                return;
+              }
+              setSession(null);
+              awaitingNewSessionRef.current = false;
+            } else if (
+              activeSessionIdRef.current !== sessionId &&
+              awaitingNewSessionRef.current
+            ) {
+              setSession(sessionId);
+              setTranscript("");
+              setError(null);
+              awaitingNewSessionRef.current = false;
+            } else if (activeSessionIdRef.current !== sessionId) {
+              return;
+            }
+          }
+
           setState(newState);
 
           if (newState === "recording") {
             const start = Date.now();
-            if (durationRef.current) clearInterval(durationRef.current);
+            stopDurationTimer();
             durationRef.current = setInterval(() => {
+              if (!isMountedRef.current) {
+                return;
+              }
               setRecordingDuration((Date.now() - start) / 1000);
             }, 100);
           } else {
-            if (durationRef.current) {
-              clearInterval(durationRef.current);
-              durationRef.current = null;
-            }
-            setRecordingDuration(0);
+            stopDurationTimer();
           }
-        })
-      );
-      unlisteners.push(
-        await listen<{ text: string }>("transcript", (event) => {
-          setTranscript(event.payload.text);
-        })
-      );
-      unlisteners.push(
-        await listen<string>("error", (event) => {
-          setError(event.payload);
-        })
-      );
+        }),
+        listen<TranscriptEventPayload>("transcript", (event) => {
+          if (!isMountedRef.current) {
+            return;
+          }
+          const { text, sessionId } = event.payload;
+          if (
+            typeof sessionId !== "number" ||
+            activeSessionIdRef.current !== sessionId
+          ) {
+            return;
+          }
+          setTranscript((prev) => (prev ? `${prev}\n${text}` : text));
+        }),
+        listen<ErrorEventPayload | string>("error", (event) => {
+          if (!isMountedRef.current) {
+            return;
+          }
+
+          if (typeof event.payload === "string") {
+            if (activeSessionIdRef.current !== null) {
+              setError(event.payload);
+            }
+            return;
+          }
+
+          const { message, sessionId } = event.payload;
+          if (
+            typeof sessionId !== "number" ||
+            activeSessionIdRef.current !== sessionId
+          ) {
+            return;
+          }
+
+          setError(message);
+        }),
+      ]);
+
+      if (disposed) {
+        listeners.forEach((unlisten) => unlisten());
+        return;
+      }
+
+      unlisteners = listeners;
     }
 
-    setup();
+    setup().catch((e) => {
+      if (isMountedRef.current) {
+        setError(String(e));
+      }
+    });
 
     return () => {
+      disposed = true;
+      isMountedRef.current = false;
       unlisteners.forEach((unlisten) => unlisten());
-      if (durationRef.current) {
-        clearInterval(durationRef.current);
-        durationRef.current = null;
-      }
+      unlisteners = [];
+      stopDurationTimer();
+      activeSessionIdRef.current = null;
     };
-  }, []);
+  }, [setSession, stopDurationTimer]);
 
   const startListening = useCallback(async () => {
     setError(null);
+    awaitingNewSessionRef.current = true;
     try {
       await invoke("start_listening");
     } catch (e) {
       setError(String(e));
+      awaitingNewSessionRef.current = false;
     }
   }, []);
 
@@ -82,13 +183,16 @@ export function useBackendVAD(): BackendVADResult {
     } catch (e) {
       setError(String(e));
     }
-    setState("idle");
-    setRecordingDuration(0);
-    if (durationRef.current) {
-      clearInterval(durationRef.current);
-      durationRef.current = null;
-    }
+    awaitingNewSessionRef.current = false;
   }, []);
 
-  return { state, transcript, error, recordingDuration, startListening, stopListening };
+  return {
+    state,
+    transcript,
+    error,
+    activeSessionId,
+    recordingDuration,
+    startListening,
+    stopListening,
+  };
 }
