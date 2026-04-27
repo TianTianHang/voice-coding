@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioRecorder;
 use crate::vad::{VadState, SAMPLE_RATE};
-use stt_core::SttEngine;
+use stt_core::{AudioInput, SttEngine};
 
 pub struct VadRecorderState {
     recorder: Arc<Mutex<Option<AudioRecorder>>>,
@@ -56,7 +56,7 @@ fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         } else if cfg!(target_arch = "aarch64") {
             ("Linux/arm64", "libten_vad.so")
         } else {
-            return Err(format!("Unsupported Linux architecture"));
+            return Err("Unsupported Linux architecture".to_string());
         }
     } else if cfg!(target_os = "macos") {
         if cfg!(target_arch = "x86_64") {
@@ -64,7 +64,7 @@ fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         } else if cfg!(target_arch = "aarch64") {
             ("macOS/arm64", "libten_vad.dylib")
         } else {
-            return Err(format!("Unsupported macOS architecture"));
+            return Err("Unsupported macOS architecture".to_string());
         }
     } else if cfg!(target_os = "windows") {
         if cfg!(target_arch = "x86_64") {
@@ -72,10 +72,10 @@ fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
         } else if cfg!(target_arch = "x86") {
             ("Windows/x86", "ten_vad.dll")
         } else {
-            return Err(format!("Unsupported Windows architecture"));
+            return Err("Unsupported Windows architecture".to_string());
         }
     } else {
-        return Err(format!("Unsupported operating system"));
+        return Err("Unsupported operating system".to_string());
     };
 
     let lib_path = format!("libs/{}/{}", platform, lib_name);
@@ -100,41 +100,24 @@ fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     ))
 }
 
-fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
-    let num_channels: u16 = 1;
-    let bits_per_sample: u16 = 16;
-    let byte_rate = sample_rate * num_channels as u32 * (bits_per_sample as u32 / 8);
-    let block_align: u16 = num_channels * (bits_per_sample / 8);
-    let data_size = samples.len() * (bits_per_sample as usize / 8);
-    let file_size = 36 + data_size;
-
-    let mut wav = Vec::with_capacity(44 + data_size);
-
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&(file_size as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&num_channels.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&byte_rate.to_le_bytes());
-    wav.extend_from_slice(&block_align.to_le_bytes());
-    wav.extend_from_slice(&bits_per_sample.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(data_size as u32).to_le_bytes());
-
-    for &sample in samples {
-        wav.extend_from_slice(&sample.to_le_bytes());
-    }
-
-    wav
+fn pcm_i16_to_f32(samples: &[i16]) -> Vec<f32> {
+    samples
+        .iter()
+        .map(|&sample| sample as f32 / 32768.0)
+        .collect()
 }
 
-async fn transcribe_audio_internal(_app: AppHandle, wav_data: Vec<u8>) -> Result<String, String> {
+fn vad_pcm_audio_input(samples: Vec<i16>) -> AudioInput {
+    AudioInput::Samples(pcm_i16_to_f32(&samples), SAMPLE_RATE)
+}
+
+async fn transcribe_audio_internal(
+    _app: AppHandle,
+    audio_data: Vec<i16>,
+) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
-        let input = stt_core::AudioInput::Bytes(wav_data);
+        let input = vad_pcm_audio_input(audio_data);
         let config = stt_core::SttConfig {
             language: None,
             ..Default::default()
@@ -151,7 +134,7 @@ async fn transcribe_audio_internal(_app: AppHandle, wav_data: Vec<u8>) -> Result
 
     #[cfg(not(feature = "stt-qwen3"))]
     {
-        let _ = (app, wav_data);
+        let _ = (_app, audio_data);
         Err("STT engine not available".into())
     }
 }
@@ -220,8 +203,7 @@ pub async fn start_listening(
                     }
                 }
                 crate::vad::VadEvent::SpeechDetected(audio_data) => {
-                    let wav = encode_wav(&audio_data, SAMPLE_RATE);
-                    match transcribe_audio_internal(app_clone.clone(), wav).await {
+                    match transcribe_audio_internal(app_clone.clone(), audio_data).await {
                         Ok(text) => {
                             if is_session_active(&active_session, session_id) {
                                 let _ = app_clone.emit(
@@ -329,5 +311,33 @@ pub fn get_vad_state(state: tauri::State<'_, VadRecorderState>) -> Result<String
             Ok(sm.get_state().to_string())
         }
         None => Ok(VadState::Idle.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pcm_i16_to_f32_normalizes_positive_negative_and_zero_samples() {
+        let samples = pcm_i16_to_f32(&[0, 16384, i16::MAX, i16::MIN]);
+
+        assert_eq!(samples[0], 0.0);
+        assert_eq!(samples[1], 0.5);
+        assert!((samples[2] - 32767.0 / 32768.0).abs() < f32::EPSILON);
+        assert_eq!(samples[3], -1.0);
+    }
+
+    #[test]
+    fn vad_pcm_audio_input_constructs_samples_variant() {
+        let input = vad_pcm_audio_input(vec![0, 16384, i16::MIN]);
+
+        match input {
+            AudioInput::Samples(samples, sample_rate) => {
+                assert_eq!(sample_rate, SAMPLE_RATE);
+                assert_eq!(samples, vec![0.0, 0.5, -1.0]);
+            }
+            other => panic!("Expected Samples input, got {:?}", other),
+        }
     }
 }
