@@ -27,7 +27,11 @@ export function ControlButton({ state, onStart, onStop }: ControlButtonProps) {
         transition: "background-color 0.2s, opacity 0.2s",
       }}
     >
-      {isProcessing ? "Processing..." : isIdle ? "Start Listening" : "Stop Listening"}
+      {isProcessing
+        ? "Processing current utterance..."
+        : isIdle
+          ? "Start Listening"
+          : "Stop Session"}
     </button>
   );
 }

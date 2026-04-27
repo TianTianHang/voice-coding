@@ -23,7 +23,8 @@ export function VoiceRecorder() {
     <div style={{ maxWidth: 600, margin: "0 auto", padding: 20 }}>
       <h1 style={{ textAlign: "center", marginBottom: 24 }}>Voice Coding</h1>
       <p style={{ textAlign: "center", color: "#888", fontSize: 14, marginBottom: 16 }}>
-        Click "Start Listening", then speak. The app will automatically detect your voice and transcribe it.
+        Click "Start Listening", then speak. The session stays active after each result so you can
+        continue with the next utterance.
       </p>
 
       <div style={{ display: "flex", justifyContent: "center", marginBottom: 16 }}>
@@ -40,7 +41,7 @@ export function VoiceRecorder() {
 
       {state === "processing" && (
         <div style={{ textAlign: "center", padding: 8, color: "#f39c12" }}>
-          Transcribing audio...
+          Transcribing current utterance. Listening will resume automatically.
         </div>
       )}
 

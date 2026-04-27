@@ -58,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn finish_transcription_returns_to_idle() {
+    fn finish_transcription_returns_to_listening() {
         let (tx, rx) = unbounded();
         let mut sm = VadStateMachine::new(tx);
 
@@ -66,11 +66,71 @@ mod tests {
         sm.process_frame(&[1; 256], true);
         sm.finish_transcription();
 
-        assert_eq!(sm.get_state(), VadState::Idle);
+        assert_eq!(sm.get_state(), VadState::Listening);
         let events: Vec<VadEvent> = rx.try_iter().collect();
         assert!(events
             .iter()
-            .any(|event| matches!(event, VadEvent::StateChanged(VadState::Idle))));
+            .any(|event| matches!(event, VadEvent::StateChanged(VadState::Listening))));
+    }
+
+    #[test]
+    fn short_utterance_returns_to_listening_without_transcription() {
+        let (tx, rx) = unbounded();
+        let mut sm = VadStateMachine::new(tx);
+
+        sm.start();
+        sm.process_frame(&[1; 256], true);
+        for _ in 0..super::SILENCE_FRAMES {
+            sm.process_frame(&[0; 256], false);
+        }
+
+        assert_eq!(sm.get_state(), VadState::Listening);
+        let events: Vec<VadEvent> = rx.try_iter().collect();
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, VadEvent::SpeechDetected(_))));
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, VadEvent::StateChanged(VadState::Listening))));
+    }
+
+    #[test]
+    fn repeated_utterances_cycle_processing_back_to_listening() {
+        let (tx, rx) = unbounded();
+        let mut sm = VadStateMachine::new(tx);
+
+        sm.start();
+
+        for _ in 0..2 {
+            sm.process_frame(&[1; 256], true);
+            for _ in 0..31 {
+                sm.process_frame(&[1; 256], true);
+            }
+            for _ in 0..super::SILENCE_FRAMES {
+                sm.process_frame(&[0; 256], false);
+            }
+            assert_eq!(sm.get_state(), VadState::Processing);
+            sm.finish_transcription();
+            assert_eq!(sm.get_state(), VadState::Listening);
+        }
+
+        let events: Vec<VadEvent> = rx.try_iter().collect();
+        let processing_count = events
+            .iter()
+            .filter(|event| matches!(event, VadEvent::StateChanged(VadState::Processing)))
+            .count();
+        let listening_count = events
+            .iter()
+            .filter(|event| matches!(event, VadEvent::StateChanged(VadState::Listening)))
+            .count();
+        let speech_detected_count = events
+            .iter()
+            .filter(|event| matches!(event, VadEvent::SpeechDetected(_)))
+            .count();
+
+        assert_eq!(processing_count, 2);
+        assert!(listening_count >= 3);
+        assert_eq!(speech_detected_count, 2);
     }
 }
 
@@ -136,8 +196,10 @@ impl VadStateMachine {
                         if audio_data.len() >= MIN_RECORDING_SAMPLES {
                             let _ = self.event_tx.send(VadEvent::SpeechDetected(audio_data));
                         } else {
-                            self.state = VadState::Idle;
-                            let _ = self.event_tx.send(VadEvent::StateChanged(VadState::Idle));
+                            self.state = VadState::Listening;
+                            let _ = self
+                                .event_tx
+                                .send(VadEvent::StateChanged(VadState::Listening));
                         }
                     }
                 }
@@ -146,10 +208,12 @@ impl VadStateMachine {
     }
 
     pub fn finish_transcription(&mut self) {
-        self.state = VadState::Idle;
+        self.state = VadState::Listening;
         self.buffer.clear();
         self.silence_counter = 0;
-        let _ = self.event_tx.send(VadEvent::StateChanged(VadState::Idle));
+        let _ = self
+            .event_tx
+            .send(VadEvent::StateChanged(VadState::Listening));
     }
 
     pub fn get_state(&self) -> VadState {

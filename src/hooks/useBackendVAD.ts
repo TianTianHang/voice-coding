@@ -29,6 +29,83 @@ type ErrorEventPayload = {
   sessionId?: number;
 };
 
+type SessionResolutionInput = {
+  currentSessionId: number | null;
+  awaitingNewSession: boolean;
+  incomingSessionId?: number;
+  incomingState: VADState;
+};
+
+type SessionResolution = {
+  acceptEvent: boolean;
+  nextSessionId: number | null;
+  nextAwaitingNewSession: boolean;
+  shouldResetSessionData: boolean;
+};
+
+export function resolveSessionForVadStateEvent({
+  currentSessionId,
+  awaitingNewSession,
+  incomingSessionId,
+  incomingState,
+}: SessionResolutionInput): SessionResolution {
+  if (typeof incomingSessionId !== "number") {
+    return {
+      acceptEvent: true,
+      nextSessionId: currentSessionId,
+      nextAwaitingNewSession: awaitingNewSession,
+      shouldResetSessionData: false,
+    };
+  }
+
+  if (incomingState === "idle") {
+    if (currentSessionId !== null && currentSessionId !== incomingSessionId) {
+      return {
+        acceptEvent: false,
+        nextSessionId: currentSessionId,
+        nextAwaitingNewSession: awaitingNewSession,
+        shouldResetSessionData: false,
+      };
+    }
+
+    return {
+      acceptEvent: true,
+      nextSessionId: null,
+      nextAwaitingNewSession: false,
+      shouldResetSessionData: false,
+    };
+  }
+
+  if (currentSessionId === incomingSessionId) {
+    return {
+      acceptEvent: true,
+      nextSessionId: currentSessionId,
+      nextAwaitingNewSession: awaitingNewSession,
+      shouldResetSessionData: false,
+    };
+  }
+
+  if (awaitingNewSession) {
+    return {
+      acceptEvent: true,
+      nextSessionId: incomingSessionId,
+      nextAwaitingNewSession: false,
+      shouldResetSessionData: true,
+    };
+  }
+
+  return {
+    acceptEvent: false,
+    nextSessionId: currentSessionId,
+    nextAwaitingNewSession: awaitingNewSession,
+    shouldResetSessionData: false,
+  };
+}
+
+export function appendTranscriptLine(previous: string, nextText: string): string {
+  return previous ? `${previous}\n${nextText}` : nextText;
+}
+
 export function useBackendVAD(): BackendVADResult {
   const [state, setState] = useState<VADState>("idle");
   const [transcript, setTranscript] = useState<string>("");
@@ -67,28 +144,28 @@ export function useBackendVAD(): BackendVADResult {
 
           const { state: newState, sessionId } = event.payload;
 
-          if (typeof sessionId === "number") {
-            if (newState === "idle") {
-              if (
-                activeSessionIdRef.current !== null &&
-                activeSessionIdRef.current !== sessionId
-              ) {
-                return;
-              }
-              setSession(null);
-              awaitingNewSessionRef.current = false;
-            } else if (
-              activeSessionIdRef.current !== sessionId &&
-              awaitingNewSessionRef.current
-            ) {
-              setSession(sessionId);
-              setTranscript("");
-              setError(null);
-              awaitingNewSessionRef.current = false;
-            } else if (activeSessionIdRef.current !== sessionId) {
-              return;
-            }
+          const sessionResolution = resolveSessionForVadStateEvent({
+            currentSessionId: activeSessionIdRef.current,
+            awaitingNewSession: awaitingNewSessionRef.current,
+            incomingSessionId: sessionId,
+            incomingState: newState,
+          });
+
+          if (!sessionResolution.acceptEvent) {
+            return;
           }
+
+          if (sessionResolution.nextSessionId !== activeSessionIdRef.current) {
+            setSession(sessionResolution.nextSessionId);
+          }
+
+          if (sessionResolution.shouldResetSessionData) {
+            setTranscript("");
+            setError(null);
+          }
+
+          awaitingNewSessionRef.current =
+            sessionResolution.nextAwaitingNewSession;
 
           setState(newState);
 
@@ -116,7 +193,7 @@ export function useBackendVAD(): BackendVADResult {
           ) {
             return;
           }
-          setTranscript((prev) => (prev ? `${prev}\n${text}` : text));
+          setTranscript((prev) => appendTranscriptLine(prev, text));
         }),
         listen<ErrorEventPayload | string>("error", (event) => {
           if (!isMountedRef.current) {

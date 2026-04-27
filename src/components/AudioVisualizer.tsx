@@ -7,11 +7,15 @@ interface AudioVisualizerProps {
 }
 
 const stateConfig: Record<VADState, { label: string; color: string }> = {
-  idle: { label: "Ready", color: "#888" },
-  listening: { label: "Listening...", color: "#4a90d9" },
+  idle: { label: "Stopped", color: "#888" },
+  listening: { label: "Listening (waiting for speech)...", color: "#4a90d9" },
   recording: { label: "Recording...", color: "#e74c3c" },
   processing: { label: "Processing...", color: "#f39c12" },
 };
+
+export function getVadStatusLabel(state: VADState): string {
+  return stateConfig[state].label;
+}
 
 export function AudioVisualizer({ state, recordingDuration }: AudioVisualizerProps) {
   const config = stateConfig[state];

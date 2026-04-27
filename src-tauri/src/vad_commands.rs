@@ -194,6 +194,8 @@ pub async fn start_listening(
     let sm = recorder.state_machine();
     let event_rx = recorder.event_rx();
     let active_session = state.active_session.clone();
+    let recorder_slot = state.recorder.clone();
+    let starting = state.starting.clone();
 
     {
         let mut guard = state.recorder.lock();
@@ -250,6 +252,22 @@ pub async fn start_listening(
                         );
                         let mut sm_guard = sm.lock();
                         sm_guard.stop();
+                        drop(sm_guard);
+
+                        {
+                            let mut recorder_guard = recorder_slot.lock();
+                            recorder_guard.take();
+                        }
+
+                        {
+                            let mut session_guard = active_session.lock();
+                            session_guard.take();
+                        }
+
+                        {
+                            let mut starting_guard = starting.lock();
+                            *starting_guard = false;
+                        }
                     }
                 }
             }

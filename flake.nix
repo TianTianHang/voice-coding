@@ -19,6 +19,63 @@
           extensions = [ "rust-src" "rust-analyzer" "rustfmt" "clippy" ];
         };
         
+        cargoWrapper = pkgs.writeShellScriptBin "cargo" ''
+          set -euo pipefail
+
+          real_cargo="${rustToolchain}/bin/cargo"
+          command_name="''${1:-}"
+
+          has_manifest_arg() {
+            for arg in "$@"; do
+              case "$arg" in
+                --manifest-path|--manifest-path=*) return 0 ;;
+              esac
+            done
+            return 1
+          }
+
+          has_version_arg() {
+            for arg in "$@"; do
+              case "$arg" in
+                --version|-V) return 0 ;;
+              esac
+            done
+            return 1
+          }
+
+          has_help_arg() {
+            for arg in "$@"; do
+              case "$arg" in
+                --help|-h) return 0 ;;
+              esac
+            done
+            return 1
+          }
+
+          case "$command_name" in
+            clippy)
+              shift
+              if has_version_arg "$@" || has_help_arg "$@"; then
+                exec "${rustToolchain}/bin/cargo-clippy" "$@"
+              fi
+
+              if [ ! -f Cargo.toml ] && [ -f src-tauri/Cargo.toml ] && ! has_manifest_arg "$@"; then
+                exec "${rustToolchain}/bin/cargo-clippy" clippy --manifest-path "$PWD/src-tauri/Cargo.toml" "$@"
+              fi
+
+              exec "${rustToolchain}/bin/cargo-clippy" clippy "$@"
+              ;;
+            build|check|test|run|doc|fmt|clean|metadata)
+              if [ ! -f Cargo.toml ] && [ -f src-tauri/Cargo.toml ] && ! has_manifest_arg "$@" && ! has_version_arg "$@"; then
+                shift
+                exec "$real_cargo" "$command_name" --manifest-path "$PWD/src-tauri/Cargo.toml" "$@"
+              fi
+              ;;
+          esac
+
+          exec "$real_cargo" "$@"
+        '';
+        
         buildInputs = with pkgs; [
           # Tauri dependencies
           webkitgtk_4_1
@@ -64,6 +121,7 @@
         
         nativeBuildInputs = with pkgs; [
           # Rust toolchain
+          cargoWrapper
           rustToolchain
           
           # Node.js ecosystem
@@ -90,6 +148,16 @@
           inherit buildInputs nativeBuildInputs;
           
           shellHook = ''
+            # Keep Cargo pinned to this flake's Rust toolchain. This avoids
+            # inheriting rustup linker/configuration from the user's shell.
+            export RUSTC="${rustToolchain}/bin/rustc"
+            export RUSTDOC="${rustToolchain}/bin/rustdoc"
+            export RUSTFMT="${rustToolchain}/bin/rustfmt"
+            export CLIPPY_DRIVER="${rustToolchain}/bin/clippy-driver"
+            export CARGO_TARGET_DIR="$PWD/src-tauri/target/nix"
+            export CC="${pkgs.stdenv.cc}/bin/cc"
+            export CXX="${pkgs.stdenv.cc}/bin/c++"
+            
             # Rust source path for rust-analyzer
             export RUST_SRC_PATH="${pkgs.rustPlatform.rustLibSrc}"
             
@@ -109,12 +177,12 @@
             cleanup-virtual-audio() {
               bash scripts/cleanup_virtual_audio.sh
             }
-            
+
             # Add pre-commit hook
-            if [ ! -f .git/hooks/pre-commit ]; then
+            if [ ! -f .git/hooks/pre-commit ] || grep -qx 'cargo clippy --all-targets --all-features -- -D warnings' .git/hooks/pre-commit; then
               mkdir -p .git/hooks
               echo '#!/bin/sh
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 pnpm run build || exit 1
 ' > .git/hooks/pre-commit
               chmod +x .git/hooks/pre-commit
@@ -146,6 +214,7 @@ pnpm run build || exit 1
             echo "  pnpm tauri    - Run Tauri commands"
             echo "  cargo build   - Build Rust backend"
             echo "  cargo test    - Run Rust tests"
+            echo "  cargo clippy  - Lint Rust backend"
           '';
         };
       }
