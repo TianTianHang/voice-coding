@@ -38,3 +38,17 @@ context: |
 #       - Always include a "Non-goals" section
 #     tasks:
 #       - Break tasks into chunks of max 2 hours
+rules:
+  proposal:
+    - Clearly separate product intent from implementation details.
+    - List validation expectations when the change will require checks, tests, or builds.
+  tasks:
+    - Every implementation change must include quality-gate tasks for the touched stack, such as a code checker/linter, tests, and a build or typecheck step where applicable.
+    - Do not mark implementation complete until the required checks pass or a blocker is recorded with a clear reason.
+    - For TypeScript/React work, include `pnpm build` and `pnpm test`.
+    - For Rust work, include `cargo test` and `cargo clippy`; add `pnpm tauri build` when the change affects the desktop bundle or backend integration.
+    - For Python scripts, include `.venv/bin/python -m pytest scripts/` when scripts are changed.
+    - Add an explicit verification task so the final state records which checks were run.
+  archive:
+    - Only archive a change after all implementation tasks are complete and the required checks are passing or explicitly justified as blocked.
+    - If any required check is blocked, document the blocker in the change before archiving.

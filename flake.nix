@@ -78,6 +78,11 @@
           wget
           git-xet
           git-lfs
+
+          # Virtual audio tooling (PipeWire/PulseAudio compatibility)
+          pulseaudio
+          pipewire
+          wireplumber
         ];
       in
       {
@@ -95,6 +100,15 @@
             
             # LLVM C++ libraries for ten-vad
             export LD_LIBRARY_PATH="${pkgs.libcxx}/lib:$LD_LIBRARY_PATH"
+
+            # Virtual audio helper commands
+            setup-virtual-audio() {
+              bash scripts/setup_virtual_audio.sh
+            }
+
+            cleanup-virtual-audio() {
+              bash scripts/cleanup_virtual_audio.sh
+            }
             
             # Add pre-commit hook
             if [ ! -f .git/hooks/pre-commit ]; then
@@ -119,6 +133,12 @@ pnpm run build || exit 1
               echo "⚠️  STT models not found."
               echo "   Download with: bash scripts/download_model.sh"
             fi
+
+            echo ""
+            echo "Virtual audio setup (for Rust backend recording tests):"
+            echo "  setup-virtual-audio   - Create virtual input via PipeWire/PulseAudio"
+            echo "  cleanup-virtual-audio - Remove virtual audio modules"
+            echo "  docs/VIRTUAL_AUDIO_GUIDE.md"
             
             echo ""
             echo "Available commands:"
