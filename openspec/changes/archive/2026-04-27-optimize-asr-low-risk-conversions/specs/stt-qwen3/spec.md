@@ -1,5 +1,3 @@
-# Spec: Qwen3 ASR Implementation (Delta)
-
 ## MODIFIED Requirements
 
 ### Requirement: Transcribe audio from memory buffer

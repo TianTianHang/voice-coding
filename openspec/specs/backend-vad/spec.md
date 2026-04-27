@@ -71,7 +71,7 @@ The system SHALL analyze each audio frame to detect speech activity.
 
 ### Requirement: Maintain VAD state machine
 
-The system SHALL manage state transitions between idle, listening, recording, and processing.
+The system SHALL manage state transitions between idle, listening, recording, and processing while keeping the session in listening mode after each utterance completes.
 
 #### Scenario: State transitions
 
@@ -92,7 +92,15 @@ The system SHALL manage state transitions between idle, listening, recording, an
 - **AND** system SHALL emit `vad-state` event with value "Processing"
 - **AND** system SHALL trigger ASR transcription
 
-- **WHEN** transcription completes
+- **WHEN** transcription completes successfully
+- **THEN** state SHALL transition to `listening`
+- **AND** system SHALL emit `vad-state` event with value "Listening"
+
+- **WHEN** transcription fails for a recoverable reason
+- **THEN** state SHALL transition to `listening`
+- **AND** system SHALL emit `vad-state` event with value "Listening"
+
+- **WHEN** `stop_listening` command is received or a fatal device failure occurs
 - **THEN** state SHALL transition to `idle`
 - **AND** system SHALL emit `vad-state` event with value "Idle"
 
@@ -128,7 +136,7 @@ The system SHALL accumulate audio frames while in `recording` state.
 
 ### Requirement: Detect speech end via silence threshold
 
-The system SHALL detect end of speech when consecutive non-speech frames exceed threshold.
+The system SHALL detect end of speech when consecutive non-speech frames exceed threshold and resume listening after the transcript is handled.
 
 #### Scenario: Silence counting
 
@@ -149,7 +157,7 @@ The system SHALL detect end of speech when consecutive non-speech frames exceed 
 
 - **WHEN** total recording duration < 0.5 seconds (8000 samples)
 - **THEN** system SHALL discard recording
-- **AND** it SHALL return to `idle` state
+- **AND** it SHALL return to `listening` state
 - **AND** it SHALL NOT trigger transcription
 
 ### Requirement: Integrate with cpal audio stream

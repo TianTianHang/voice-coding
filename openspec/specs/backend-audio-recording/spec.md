@@ -28,7 +28,7 @@ The system SHALL capture audio from the default system microphone using the cpal
 
 ### Requirement: Receive audio frames in callback
 
-The system SHALL process audio frames through cpal's input stream callback.
+The system SHALL process audio frames through cpal's input stream callback while the listening session remains active across multiple utterances.
 
 #### Scenario: Frame delivery
 
@@ -45,7 +45,7 @@ The system SHALL process audio frames through cpal's input stream callback.
 
 ### Requirement: Auto-start stream on command
 
-The system SHALL automatically start the audio stream when `start_listening` is called.
+The system SHALL automatically start the audio stream when `start_listening` is called and keep it alive until explicit stop.
 
 #### Scenario: Stream lifecycle
 

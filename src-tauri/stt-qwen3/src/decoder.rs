@@ -15,30 +15,25 @@ pub fn embed_and_fuse(
 
     let mut input_embeds = Array3::zeros((1, seq_len, hidden_size));
 
-    let audio_pad_positions: Vec<usize> = token_ids
-        .iter()
-        .enumerate()
-        .filter(|(_, &id)| id == AUDIO_PAD_ID)
-        .map(|(i, _)| i)
-        .collect();
-
-    if audio_pad_positions.len() != encoder_output.len() {
+    let audio_pad_count = token_ids.iter().filter(|&&id| id == AUDIO_PAD_ID).count();
+    if audio_pad_count != encoder_output.len() {
         return Err(SttError::InferenceError {
             model: "embedding_fusion".into(),
             detail: format!(
                 "Encoder output count ({}) does not match audio pad token count ({})",
                 encoder_output.len(),
-                audio_pad_positions.len()
+                audio_pad_count
             ),
         });
     }
 
+    let mut audio_idx = 0;
     for (pos, &token_id) in token_ids.iter().enumerate() {
         if token_id == AUDIO_PAD_ID {
-            let pad_idx = audio_pad_positions.iter().position(|&p| p == pos).unwrap();
-            for (d, &v) in encoder_output[pad_idx].iter().enumerate() {
+            for (d, &v) in encoder_output[audio_idx].iter().enumerate() {
                 input_embeds[[0, pos, d]] = v;
             }
+            audio_idx += 1;
         } else {
             let emb = embeddings.get_embedding(token_id);
             for (d, &v) in emb.iter().enumerate() {
@@ -101,21 +96,7 @@ pub fn decoder_init(
                 detail: format!("Failed to extract logits: {}", e),
             })?;
 
-    let logits_vec = logits_data.to_vec();
-    let logits_array = ndarray::Array3::from_shape_vec(
-        (
-            logits_shape[0] as usize,
-            logits_shape[1] as usize,
-            logits_shape[2] as usize,
-        ),
-        logits_vec,
-    )
-    .map_err(|e| SttError::InferenceError {
-        model: "decoder_init".into(),
-        detail: format!("Failed to reshape logits: {}", e),
-    })?;
-
-    let first_token = greedy_decode(&logits_array.view());
+    let first_token = greedy_decode_logits(logits_shape, logits_data, "decoder_init")?;
 
     let present_keys = &outputs[1];
     let (keys_shape, keys_data) =
@@ -237,21 +218,7 @@ pub fn decoder_step(
                 detail: format!("Failed to extract logits: {}", e),
             })?;
 
-    let logits_vec = logits_data.to_vec();
-    let logits_array = ndarray::Array3::from_shape_vec(
-        (
-            logits_shape[0] as usize,
-            logits_shape[1] as usize,
-            logits_shape[2] as usize,
-        ),
-        logits_vec,
-    )
-    .map_err(|e| SttError::InferenceError {
-        model: "decoder_step".into(),
-        detail: format!("Failed to reshape logits: {}", e),
-    })?;
-
-    let next_token = greedy_decode(&logits_array.view());
+    let next_token = greedy_decode_logits(logits_shape, logits_data, "decoder_step")?;
 
     let present_keys = &outputs[1];
     let (keys_shape, keys_data) =
@@ -305,8 +272,49 @@ pub fn decoder_step(
     Ok((next_token, new_cache))
 }
 
-fn greedy_decode(logits: &ndarray::ArrayView3<f32>) -> u32 {
-    let last_logits = logits.slice(ndarray::s![0, -1, ..]);
+pub(crate) fn greedy_decode_logits(
+    logits_shape: &[i64],
+    logits_data: &[f32],
+    model: &str,
+) -> Result<u32, SttError> {
+    if logits_shape.len() != 3 {
+        return Err(SttError::InferenceError {
+            model: model.into(),
+            detail: format!("Expected rank-3 logits tensor, got shape {:?}", logits_shape),
+        });
+    }
+
+    if logits_shape.iter().any(|&dim| dim <= 0) {
+        return Err(SttError::InferenceError {
+            model: model.into(),
+            detail: format!("Expected positive logits dimensions, got {:?}", logits_shape),
+        });
+    }
+
+    let batch_size = logits_shape[0] as usize;
+    let seq_len = logits_shape[1] as usize;
+    let vocab_size = logits_shape[2] as usize;
+    let expected_len = batch_size
+        .checked_mul(seq_len)
+        .and_then(|len| len.checked_mul(vocab_size))
+        .ok_or_else(|| SttError::InferenceError {
+            model: model.into(),
+            detail: format!("Logits shape is too large: {:?}", logits_shape),
+        })?;
+
+    if logits_data.len() != expected_len {
+        return Err(SttError::InferenceError {
+            model: model.into(),
+            detail: format!(
+                "Logits data length ({}) does not match shape {:?}",
+                logits_data.len(),
+                logits_shape
+            ),
+        });
+    }
+
+    let last_position_start = (seq_len - 1) * vocab_size;
+    let last_logits = &logits_data[last_position_start..last_position_start + vocab_size];
     let mut max_idx = 0usize;
     let mut max_val = f32::NEG_INFINITY;
     for (i, &v) in last_logits.iter().enumerate() {
@@ -315,7 +323,8 @@ fn greedy_decode(logits: &ndarray::ArrayView3<f32>) -> u32 {
             max_idx = i;
         }
     }
-    max_idx as u32
+
+    Ok(max_idx as u32)
 }
 
 pub fn run_autoregressive_decode(
@@ -330,9 +339,8 @@ pub fn run_autoregressive_decode(
 
     let mut tokens = vec![init_token];
     let mut cache = init_cache;
-    let mut cur_pos = seq_len;
 
-    for _ in 0..max_new_tokens {
+    for cur_pos in (seq_len..).take(max_new_tokens) {
         let (next_token, new_cache) = decoder_step(
             *tokens.last().unwrap(),
             cur_pos,
@@ -347,7 +355,6 @@ pub fn run_autoregressive_decode(
 
         tokens.push(next_token);
         cache = new_cache;
-        cur_pos += 1;
     }
 
     Ok(tokens)
@@ -413,6 +420,22 @@ mod tests {
             }
             _ => panic!("Expected InferenceError"),
         }
+    }
+
+    #[test]
+    fn test_embed_and_fuse_preserves_ordered_audio_fusion() {
+        let embeddings = create_test_embeddings(4);
+        let token_ids = vec![151644, AUDIO_PAD_ID, 872, AUDIO_PAD_ID, 198];
+        let encoder_output = vec![vec![1.0, 1.1, 1.2, 1.3], vec![2.0, 2.1, 2.2, 2.3]];
+
+        let result = embed_and_fuse(&token_ids, &encoder_output, &embeddings).unwrap();
+
+        assert_eq!(result.shape(), &[1, 5, 4]);
+        assert_eq!(result[[0, 1, 0]], 1.0);
+        assert_eq!(result[[0, 1, 3]], 1.3);
+        assert_eq!(result[[0, 3, 0]], 2.0);
+        assert_eq!(result[[0, 3, 3]], 2.3);
+        assert_eq!(result[[0, 2, 0]], embeddings.data[872 * 4]);
     }
 
     #[test]
@@ -496,9 +519,8 @@ mod tests {
         let mut logits_data = vec![0.0f32; 1000];
         logits_data[42] = 10.0;
         logits_data[100] = 5.0;
-        let logits = ndarray::Array3::from_shape_vec((1, 1, 1000), logits_data).unwrap();
 
-        let token = greedy_decode(&logits.view());
+        let token = greedy_decode_logits(&[1, 1, 1000], &logits_data, "test").unwrap();
 
         assert_eq!(token, 42);
     }
@@ -506,9 +528,8 @@ mod tests {
     #[test]
     fn test_greedy_decode_with_equal_logits() {
         let logits_data = vec![5.0f32; 10];
-        let logits = ndarray::Array3::from_shape_vec((1, 1, 10), logits_data).unwrap();
 
-        let token = greedy_decode(&logits.view());
+        let token = greedy_decode_logits(&[1, 1, 10], &logits_data, "test").unwrap();
 
         assert_eq!(token, 0);
     }
@@ -518,9 +539,8 @@ mod tests {
         let mut logits_data = vec![-10.0f32; 100];
         logits_data[50] = -1.0;
         logits_data[75] = -5.0;
-        let logits = ndarray::Array3::from_shape_vec((1, 1, 100), logits_data).unwrap();
 
-        let token = greedy_decode(&logits.view());
+        let token = greedy_decode_logits(&[1, 1, 100], &logits_data, "test").unwrap();
 
         assert_eq!(token, 50);
     }
@@ -529,12 +549,39 @@ mod tests {
     fn test_greedy_decode_extracts_from_last_position() {
         let mut logits_data = vec![0.0f32; 300];
         logits_data[100] = 10.0;
-        logits_data[200] = 5.0;
-        let logits = ndarray::Array3::from_shape_vec((1, 3, 100), logits_data).unwrap();
+        logits_data[250] = 5.0;
 
-        let token = greedy_decode(&logits.view());
+        let token = greedy_decode_logits(&[1, 3, 100], &logits_data, "test").unwrap();
 
-        assert_eq!(token, 0);
+        assert_eq!(token, 50);
+    }
+
+    #[test]
+    fn test_greedy_decode_rejects_invalid_shape() {
+        let result = greedy_decode_logits(&[1, 0, 10], &[], "test");
+
+        assert!(result.is_err());
+        match result {
+            Err(SttError::InferenceError { model, detail }) => {
+                assert_eq!(model, "test");
+                assert!(detail.contains("positive logits dimensions"));
+            }
+            _ => panic!("Expected InferenceError"),
+        }
+    }
+
+    #[test]
+    fn test_greedy_decode_rejects_length_mismatch() {
+        let result = greedy_decode_logits(&[1, 2, 3], &[0.0; 5], "test");
+
+        assert!(result.is_err());
+        match result {
+            Err(SttError::InferenceError { model, detail }) => {
+                assert_eq!(model, "test");
+                assert!(detail.contains("does not match shape"));
+            }
+            _ => panic!("Expected InferenceError"),
+        }
     }
 
     #[test]

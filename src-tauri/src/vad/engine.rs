@@ -9,17 +9,17 @@ type TenVadDestroyFn = unsafe extern "C" fn(*mut std::ffi::c_void);
 
 #[derive(Debug)]
 pub enum VadError {
-    LoadError(String),
-    InitError(String),
-    ProcessError(i32),
+    Load(String),
+    Init(String),
+    Process(i32),
 }
 
 impl fmt::Display for VadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            VadError::LoadError(s) => write!(f, "VAD load error: {}", s),
-            VadError::InitError(s) => write!(f, "VAD init error: {}", s),
-            VadError::ProcessError(code) => write!(f, "VAD process error code: {}", code),
+            VadError::Load(s) => write!(f, "VAD load error: {}", s),
+            VadError::Init(s) => write!(f, "VAD init error: {}", s),
+            VadError::Process(code) => write!(f, "VAD process error code: {}", code),
         }
     }
 }
@@ -37,22 +37,22 @@ impl VadEngine {
     pub fn new(lib_path: &Path, hop_size: i32, threshold: f32) -> Result<Self, VadError> {
         unsafe {
             let library = Library::new(lib_path)
-                .map_err(|e| VadError::LoadError(format!("Failed to load library: {}", e)))?;
+                .map_err(|e| VadError::Load(format!("Failed to load library: {}", e)))?;
 
             let create_fn: TenVadCreateFn = *library
                 .get(b"ten_vad_create\0")
-                .map_err(|e| VadError::LoadError(format!("Symbol ten_vad_create: {}", e)))?;
+                .map_err(|e| VadError::Load(format!("Symbol ten_vad_create: {}", e)))?;
             let process_fn: TenVadProcessFn = *library
                 .get(b"ten_vad_process\0")
-                .map_err(|e| VadError::LoadError(format!("Symbol ten_vad_process: {}", e)))?;
+                .map_err(|e| VadError::Load(format!("Symbol ten_vad_process: {}", e)))?;
             let destroy_fn: TenVadDestroyFn = *library
                 .get(b"ten_vad_destroy\0")
-                .map_err(|e| VadError::LoadError(format!("Symbol ten_vad_destroy: {}", e)))?;
+                .map_err(|e| VadError::Load(format!("Symbol ten_vad_destroy: {}", e)))?;
 
             let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
             let result = create_fn(&mut handle, hop_size, threshold);
             if result != 0 || handle.is_null() {
-                return Err(VadError::InitError(format!(
+                return Err(VadError::Init(format!(
                     "ten_vad_create failed with code {}",
                     result
                 )));
@@ -79,7 +79,7 @@ impl VadEngine {
                 &mut flag,
             );
             if ret != 0 {
-                return Err(VadError::ProcessError(ret));
+                return Err(VadError::Process(ret));
             }
             Ok((prob, flag))
         }

@@ -4,7 +4,7 @@
 
 ### Requirement: Emit VAD state changes to frontend
 
-The system SHALL push state transition events to frontend via Tauri event system.
+The system SHALL push state transition events to frontend via Tauri event system and continue emitting `listening` after each completed utterance.
 
 #### Scenario: State change events
 
@@ -22,7 +22,7 @@ The system SHALL push state transition events to frontend via Tauri event system
 
 ### Requirement: Emit transcription results
 
-The system SHALL push ASR transcript text to frontend when transcription completes.
+The system SHALL push ASR transcript text to frontend when transcription completes and keep the listening session active afterwards.
 
 #### Scenario: Successful transcription
 
@@ -33,10 +33,11 @@ The system SHALL push ASR transcript text to frontend when transcription complet
 
 #### Scenario: Transcription error
 
-- **WHEN** ASR transcription fails
+- **WHEN** ASR transcription fails for a recoverable reason
 - **THEN** system SHALL emit `error` event
 - **AND** event payload SHALL include error message
 - **AND** frontend SHALL display error to user
+- **AND** system SHALL continue the listening session
 
 ### Requirement: Emit error events
 

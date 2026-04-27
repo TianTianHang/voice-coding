@@ -213,6 +213,7 @@ The system SHALL implement greedy decoding to select most likely tokens at each 
 - **THEN** system SHALL extract last logits vector: `logits[0, -1, :]`
 - **AND** it SHALL compute argmax: `next_token = argmax(logits)`
 - **AND** next_token SHALL be u32 scalar
+- **AND** it SHALL NOT require copying the full logits tensor into a new owned array before argmax
 
 #### Scenario: Append to sequence
 
