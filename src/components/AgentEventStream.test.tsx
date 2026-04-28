@@ -36,7 +36,8 @@ describe("AgentEventStream", () => {
       />,
     );
 
-    expect(markup).toContain("agent-event-tool-failed");
+    expect(markup).toContain("Run tests");
+    expect(markup).toContain("Tool");
     expect(markup).toContain("failed");
     expect(markup).toContain("src/App.tsx:12");
   });

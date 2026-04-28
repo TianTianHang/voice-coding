@@ -1,4 +1,3 @@
-import type { CSSProperties } from "react";
 import type { VADState } from "../hooks/useBackendVAD";
 
 interface AudioVisualizerProps {
@@ -19,14 +18,7 @@ export function getVadStatusLabel(state: VADState): string {
 
 export function AudioVisualizer({ state, recordingDuration }: AudioVisualizerProps) {
   const config = stateConfig[state];
-
-  const dotStyle: CSSProperties = {
-    width: 12,
-    height: 12,
-    borderRadius: "50%",
-    backgroundColor: config.color,
-    animation: state !== "idle" ? "pulse 1.5s ease-in-out infinite" : "none",
-  };
+  const isActive = state !== "idle";
 
   const durationText =
     state === "recording" && recordingDuration > 0
@@ -34,17 +26,31 @@ export function AudioVisualizer({ state, recordingDuration }: AudioVisualizerPro
       : "";
 
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "12px 0" }}>
-      <div style={dotStyle} />
-      <span style={{ color: config.color, fontWeight: 600, fontSize: 16 }}>
+    <div className="flex items-center gap-2 py-3">
+      <div
+        className={`h-3 w-3 rounded-full ${
+          state === "listening"
+            ? "bg-emerald-600"
+            : state === "recording"
+              ? "bg-rose-600"
+              : state === "processing"
+                ? "bg-amber-600"
+                : "bg-slate-500"
+        } ${isActive ? "animate-pulse" : ""}`}
+      />
+      <span
+        className={`text-base font-semibold ${
+          state === "listening"
+            ? "text-emerald-700"
+            : state === "recording"
+              ? "text-rose-700"
+              : state === "processing"
+                ? "text-amber-700"
+                : "text-slate-600"
+        }`}
+      >
         {config.label}{durationText}
       </span>
-      <style>{`
-        @keyframes pulse {
-          0%, 100% { opacity: 1; transform: scale(1); }
-          50% { opacity: 0.5; transform: scale(1.3); }
-        }
-      `}</style>
     </div>
   );
 }

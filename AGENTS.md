@@ -5,7 +5,7 @@ This file contains instructions for agentic coding assistants working in this re
 ## Project Overview
 
 This is a **Tauri v2 + React 19 + TypeScript** desktop application for voice-driven coding using automatic speech recognition (ASR). The project uses:
-- **Frontend**: React 19 with TypeScript, Vite build tool
+- **Frontend**: React 19 with TypeScript, Vite build tool, Tailwind CSS
 - **Backend**: Rust (Tauri) with Qwen3 ASR engine
 - **Python**: Utility scripts in `scripts/` using the `.venv` virtual environment
 

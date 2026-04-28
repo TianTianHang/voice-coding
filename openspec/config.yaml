@@ -7,7 +7,7 @@ context: |
   语言：中文（简体）
   所有产出物必须用简体中文撰写。
   Tech stack: Tauri v2, React 19, TypeScript, Rust, Python
-  Frontend: React 19 with TypeScript, Vite build tool, pnpm package manager
+  Frontend: React 19 with TypeScript, Vite build tool, Tailwind CSS, pnpm package manager
   Backend: Rust (Tauri) with Qwen3 ASR engine for speech recognition
   Python: Utility scripts using uv-created .venv virtual environment
   Scripts: Mixed Python and Bash scripts in scripts/ directory

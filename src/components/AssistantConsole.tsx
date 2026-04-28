@@ -45,60 +45,113 @@ export function AssistantConsole() {
   }
 
   return (
-    <main className="assistant-shell">
-      <section className="assistant-panel">
-        <header className="panel-header">
+    <main className="min-h-screen bg-slate-100 p-4 sm:p-5">
+      <section className="mx-auto flex min-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col gap-3.5 rounded-lg border border-slate-200 bg-white p-4 shadow-[0_16px_36px_rgba(20,32,36,0.14)] sm:min-h-[calc(100vh-2.5rem)]">
+        <header className="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
           <div>
-            <h1>Voice Agent</h1>
-            <p>{vadLabels[state]}</p>
+            <h1 className="m-0 text-2xl leading-tight">Voice Agent</h1>
+            <p className="mt-1.5 text-sm text-slate-500">{vadLabels[state]}</p>
           </div>
-          <div className={`connection-pill connection-${agent.connectionState}`}>
+          <div
+            className={`max-w-[280px] overflow-hidden rounded-full border px-2.5 py-1.5 text-xs font-bold text-ellipsis whitespace-nowrap max-sm:max-w-full ${
+              agent.connectionState === "connected"
+                ? "border-emerald-400/40 bg-emerald-600/10 text-emerald-800"
+                : agent.connectionState === "error"
+                  ? "border-rose-500/30 bg-rose-600/10 text-rose-700"
+                  : "border-slate-300 text-slate-500"
+            }`}
+          >
             {agent.connectionLabel}
           </div>
         </header>
 
-        <section className="status-grid" aria-label="Runtime status">
-          <div className={`status-item status-${state}`}>
-            <span>Voice</span>
-            <strong>{vadLabels[state]}</strong>
+        <section className="grid grid-cols-1 gap-2 sm:grid-cols-3" aria-label="Runtime status">
+          <div
+            className={`min-h-[62px] rounded-lg border bg-slate-100 p-2.5 ${
+              state === "listening"
+                ? "border-emerald-400/40"
+                : state === "recording"
+                  ? "border-rose-500/35"
+                  : state === "processing"
+                    ? "border-amber-500/35"
+                    : "border-slate-300"
+            }`}
+          >
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">
+              Voice
+            </span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">
+              {vadLabels[state]}
+            </strong>
           </div>
-          <div className={`status-item status-asr-${asrStatus.state}`}>
-            <span>ASR</span>
-            <strong>{asrStatusLabel(asrStatus)}</strong>
+          <div
+            className={`min-h-[62px] rounded-lg border bg-slate-100 p-2.5 ${
+              asrStatus.state === "ready"
+                ? "border-emerald-400/40"
+                : asrStatus.state === "loading"
+                  ? "border-amber-500/35"
+                  : asrStatus.state === "failed"
+                    ? "border-rose-500/35"
+                    : "border-slate-300"
+            }`}
+          >
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">
+              ASR
+            </span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">
+              {asrStatusLabel(asrStatus)}
+            </strong>
           </div>
-          <div className={`status-item status-agent-${agent.connectionState}`}>
-            <span>Agent</span>
-            <strong>{agent.connectionLabel}</strong>
+          <div
+            className={`min-h-[62px] rounded-lg border bg-slate-100 p-2.5 ${
+              agent.connectionState === "connected"
+                ? "border-emerald-400/40"
+                : agent.connectionState === "connecting"
+                  ? "border-amber-500/35"
+                  : agent.connectionState === "error"
+                    ? "border-rose-500/35"
+                    : "border-slate-300"
+            }`}
+          >
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">
+              Agent
+            </span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">
+              {agent.connectionLabel}
+            </strong>
           </div>
         </section>
 
-        <section className="agent-session-summary" aria-label="Agent session">
-          <div className="session-summary-item">
-            <span className="section-label">Mode</span>
-            <strong>{agent.sessionState.currentModeId ?? "Default"}</strong>
+        <section className="grid grid-cols-2 gap-2 sm:grid-cols-4" aria-label="Agent session">
+          <div className="min-h-[62px] rounded-lg border border-slate-300 bg-slate-100 p-2.5">
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Mode</span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">{agent.sessionState.currentModeId ?? "Default"}</strong>
           </div>
-          <div className="session-summary-item">
-            <span className="section-label">Session</span>
-            <strong>{agent.sessionState.sessionInfo.title ?? "Untitled"}</strong>
+          <div className="min-h-[62px] rounded-lg border border-slate-300 bg-slate-100 p-2.5">
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Session</span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">{agent.sessionState.sessionInfo.title ?? "Untitled"}</strong>
           </div>
-          <div className="session-summary-item">
-            <span className="section-label">Commands</span>
-            <strong>{agent.sessionState.availableCommands.length}</strong>
+          <div className="min-h-[62px] rounded-lg border border-slate-300 bg-slate-100 p-2.5">
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Commands</span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">{agent.sessionState.availableCommands.length}</strong>
           </div>
-          <div className="session-summary-item">
-            <span className="section-label">Config</span>
-            <strong>{agent.sessionState.configOptions.length}</strong>
+          <div className="min-h-[62px] rounded-lg border border-slate-300 bg-slate-100 p-2.5">
+            <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Config</span>
+            <strong className="mt-1 block text-[13px] leading-5 break-words">{agent.sessionState.configOptions.length}</strong>
           </div>
         </section>
 
         {agent.plan && agent.plan.entries.length > 0 && (
-          <section className="agent-plan" aria-label="Agent plan">
-            <div className="section-label">Current plan</div>
-            <ol>
+          <section className="rounded-lg border border-slate-300 bg-slate-50 p-3" aria-label="Agent plan">
+            <div className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Current plan</div>
+            <ol className="mt-2 grid gap-1.5 pl-5">
               {agent.plan.entries.map((entry, index) => (
-                <li className={`plan-entry plan-entry-${entry.status}`} key={index}>
-                  <span>{entry.content}</span>
-                  <small>
+                <li
+                  className={entry.status === "completed" ? "text-slate-500 line-through" : ""}
+                  key={index}
+                >
+                  <span className="block">{entry.content}</span>
+                  <small className="mt-0.5 block text-[11px] font-extrabold capitalize text-slate-500">
                     {entry.priority} · {entry.status.replace("_", " ")}
                   </small>
                 </li>
@@ -107,14 +160,14 @@ export function AssistantConsole() {
           </section>
         )}
 
-        <section className="control-row">
+        <section className="flex items-center gap-2.5 max-sm:flex-col max-sm:items-stretch">
           <ControlButton
             state={state}
             onStart={startListening}
             onStop={stopListening}
           />
           <button
-            className="secondary-button"
+            className="min-h-10 rounded-lg bg-slate-100 px-3.5 text-sm font-extrabold text-slate-800 transition-colors hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-60"
             onClick={
               agent.connectionState === "connected"
                 ? agent.disconnect
@@ -128,17 +181,25 @@ export function AssistantConsole() {
           </button>
         </section>
 
-        <section className="close-behavior" aria-label="Close behavior">
-          <span className="section-label">Close window</span>
-          <div className="segmented-control">
+        <section className="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch" aria-label="Close behavior">
+          <span className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Close window</span>
+          <div className="grid grid-cols-2 gap-1 rounded-lg border border-slate-300 bg-slate-100 p-1 min-[380px]:min-w-[220px]">
             <button
-              className={closeBehavior === "hide" ? "active" : ""}
+              className={`min-h-[30px] rounded-md px-2.5 text-xs font-extrabold transition-colors ${
+                closeBehavior === "hide"
+                  ? "bg-emerald-600 text-white"
+                  : "text-slate-500 hover:bg-white"
+              }`}
               onClick={() => setCloseBehavior("hide")}
             >
               Hide to tray
             </button>
             <button
-              className={closeBehavior === "exit" ? "active" : ""}
+              className={`min-h-[30px] rounded-md px-2.5 text-xs font-extrabold transition-colors ${
+                closeBehavior === "exit"
+                  ? "bg-emerald-600 text-white"
+                  : "text-slate-500 hover:bg-white"
+              }`}
               onClick={() => setCloseBehavior("exit")}
             >
               Exit app
@@ -148,15 +209,15 @@ export function AssistantConsole() {
 
         <AudioVisualizer state={state} recordingDuration={recordingDuration} />
 
-        <section className="current-utterance" aria-label="Current sentence">
-          <div className="section-label">Current sentence</div>
-          <div className="utterance-text">
+        <section className="rounded-lg border border-slate-300 bg-slate-50 p-3" aria-label="Current sentence">
+          <div className="block text-[11px] font-extrabold uppercase tracking-[0.06em] text-slate-500">Current sentence</div>
+          <div className="mt-2 min-h-16 whitespace-pre-wrap leading-[1.45]">
             {speechError ? (
-              <span className="utterance-error">{speechError}</span>
+              <span className="font-bold text-rose-700">{speechError}</span>
             ) : transcript ? (
               transcript
             ) : (
-              <span className="utterance-placeholder">
+              <span className="text-slate-500">
                 Waiting for your next sentence.
               </span>
             )}
