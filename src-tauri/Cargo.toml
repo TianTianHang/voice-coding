@@ -33,6 +33,8 @@ tauri-plugin-opener = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 once_cell = { workspace = true }
+agent-client-protocol = "0.11.1"
+agent-client-protocol-tokio = "0.11.1"
 stt-core = { path = "stt-core" }
 stt-qwen3 = { path = "stt-qwen3", optional = true }
 uuid = { version = "1.23.1", features = ["v4"] }
@@ -41,6 +43,7 @@ libloading = "0.9.0"
 crossbeam-channel = "0.5.15"
 parking_lot = "0.12.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "process", "io-util", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 
 [features]
 default = ["stt-qwen3"]

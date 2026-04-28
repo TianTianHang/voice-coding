@@ -31,3 +31,4 @@ test_audio
 
 .venv
 .codex
+.env

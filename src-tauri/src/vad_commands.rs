@@ -212,9 +212,7 @@ pub async fn start_listening(
                                     serde_json::json!({ "text": text, "sessionId": session_id }),
                                 );
                                 let runtime = app_clone.state::<crate::acp::AcpRuntime>();
-                                if let Err(e) = runtime
-                                    .send_prompt(app_clone.clone(), prompt)
-                                    .await
+                                if let Err(e) = runtime.send_prompt(app_clone.clone(), prompt).await
                                 {
                                     crate::acp::session::emit_agent_event(
                                         &app_clone,

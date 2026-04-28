@@ -461,7 +461,9 @@ mod tests {
 
         assert_eq!(status.state, AsrLoadState::Failed);
         assert_eq!(
-            result.err().expect("failed runtime should reject transcription"),
+            result
+                .err()
+                .expect("failed runtime should reject transcription"),
             "ASR model failed to load: bad load"
         );
     }
@@ -487,7 +489,9 @@ mod tests {
 
         let mut seen_loading = false;
         for _ in 0..200 {
-            if calls.load(Ordering::SeqCst) == 1 && runtime.status().await.state == AsrLoadState::Loading {
+            if calls.load(Ordering::SeqCst) == 1
+                && runtime.status().await.state == AsrLoadState::Loading
+            {
                 seen_loading = true;
                 break;
             }
@@ -539,7 +543,9 @@ mod tests {
 
         let mut seen_loading = false;
         for _ in 0..200 {
-            if calls.load(Ordering::SeqCst) == 1 && runtime.status().await.state == AsrLoadState::Loading {
+            if calls.load(Ordering::SeqCst) == 1
+                && runtime.status().await.state == AsrLoadState::Loading
+            {
                 seen_loading = true;
                 break;
             }

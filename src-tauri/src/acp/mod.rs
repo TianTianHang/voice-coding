@@ -1,5 +1,5 @@
+pub mod client;
 pub mod events;
-pub mod json_rpc;
 pub mod profile;
 pub mod session;
 pub mod transport;

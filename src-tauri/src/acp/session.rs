@@ -1,26 +1,40 @@
+use agent_client_protocol::schema::{
+    CreateTerminalRequest, InitializeRequest, KillTerminalRequest, ProtocolVersion,
+    ReadTextFileRequest, ReleaseTerminalRequest, RequestPermissionRequest, SessionNotification,
+    TerminalOutputRequest, WaitForTerminalExitRequest, WriteTextFileRequest,
+};
+use agent_client_protocol::{Agent, Client, ConnectionTo, JsonRpcResponse, Responder};
 use parking_lot::Mutex;
-use serde_json::{json, Value};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::process::Child;
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
-use super::events::{AgentEvent, AgentEventKind, AgentStatus};
-use super::json_rpc::{notification, parse_incoming, request, IncomingMessage, RequestIds};
+use super::client::{respond_pending_permission, PendingPermissions, VoiceCodingAcpClient};
+use super::events::{AgentEvent, AgentStatus};
 use super::profile::AgentProfile;
-use super::transport::JsonRpcTransport;
+use super::transport::spawn_sdk_transport;
 
-struct ActiveSession {
+struct PromptCommand {
+    prompt: String,
+    result: oneshot::Sender<Result<(), String>>,
+}
+
+type ReadySender = oneshot::Sender<Result<(String, mpsc::UnboundedSender<PromptCommand>), String>>;
+
+struct ActiveAgent {
     profile: AgentProfile,
     session_id: String,
-    transport: Arc<AsyncMutex<JsonRpcTransport>>,
+    prompt_tx: mpsc::UnboundedSender<PromptCommand>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    child: Arc<AsyncMutex<Child>>,
+    task: tauri::async_runtime::JoinHandle<()>,
 }
 
 #[derive(Default)]
 pub struct AcpRuntime {
-    active: Mutex<Option<ActiveSession>>,
-    request_ids: RequestIds,
-    confirmations: Mutex<HashMap<String, String>>,
+    active: Arc<Mutex<Option<ActiveAgent>>>,
+    pending_permissions: PendingPermissions,
 }
 
 impl AcpRuntime {
@@ -52,60 +66,59 @@ impl AcpRuntime {
         }
 
         emit_agent_event(&app, AgentEvent::status("Connecting ACP agent"));
-        let (transport, mut rx) = JsonRpcTransport::spawn(&profile)?;
-        let transport = Arc::new(AsyncMutex::new(transport));
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let (transport, child) = spawn_sdk_transport(&profile)?;
+        let child = Arc::new(AsyncMutex::new(child));
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let active = self.active.clone();
+        let pending_permissions = self.pending_permissions.clone();
+        let profile_for_task = profile.clone();
+        let app_for_task = app.clone();
+        let child_for_task = child.clone();
 
-        {
-            let mut writer = transport.lock().await;
-            writer
-                .write_json(&request(
-                    self.request_ids.next(),
-                    "initialize",
-                    Some(json!({
-                        "clientInfo": {
-                            "name": "voice-coding",
-                            "version": env!("CARGO_PKG_VERSION")
-                        }
-                    })),
-                ))
-                .await?;
-            writer
-                .write_json(&request(
-                    self.request_ids.next(),
-                    "session/new",
-                    Some(json!({ "sessionId": session_id })),
-                ))
-                .await?;
-        }
+        let task = tauri::async_runtime::spawn(async move {
+            let result = run_sdk_connection(
+                app_for_task.clone(),
+                profile_for_task.clone(),
+                transport,
+                pending_permissions,
+                ready_tx,
+                shutdown_rx,
+            )
+            .await;
+
+            if let Err(err) = result {
+                emit_agent_event(&app_for_task, AgentEvent::error(err.clone()));
+                emit_agent_status(
+                    &app_for_task,
+                    AgentStatus {
+                        connected: false,
+                        profile_name: None,
+                        session_id: None,
+                        error: Some(err),
+                    },
+                );
+            }
+
+            let _ = child_for_task.lock().await.kill().await;
+            *active.lock() = None;
+        });
+
+        let (session_id, prompt_tx) = ready_rx
+            .await
+            .map_err(|_| "ACP agent connection closed before session was ready".to_string())??;
 
         {
             let mut active = self.active.lock();
-            *active = Some(ActiveSession {
+            *active = Some(ActiveAgent {
                 profile,
                 session_id,
-                transport: transport.clone(),
+                prompt_tx,
+                shutdown_tx: Some(shutdown_tx),
+                child,
+                task,
             });
         }
-
-        let app_for_reader = app.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(line) = rx.recv().await {
-                match normalize_line(&line) {
-                    Ok(event) => emit_agent_event(&app_for_reader, event),
-                    Err(err) => emit_agent_event(&app_for_reader, AgentEvent::error(err)),
-                }
-            }
-            emit_agent_status(
-                &app_for_reader,
-                AgentStatus {
-                    connected: false,
-                    profile_name: None,
-                    session_id: None,
-                    error: Some("ACP agent output stream closed".into()),
-                },
-            );
-        });
 
         let status = self.status();
         emit_agent_status(&app, status.clone());
@@ -115,9 +128,14 @@ impl AcpRuntime {
 
     pub async fn disconnect(&self, app: AppHandle) -> Result<AgentStatus, String> {
         let active = self.active.lock().take();
-        if let Some(active) = active {
-            active.transport.lock().await.shutdown().await;
+        if let Some(mut active) = active {
+            if let Some(shutdown_tx) = active.shutdown_tx.take() {
+                let _ = shutdown_tx.send(());
+            }
+            let _ = active.child.lock().await.kill().await;
+            active.task.abort();
         }
+        self.pending_permissions.lock().clear();
 
         let status = AgentStatus::disconnected();
         emit_agent_status(&app, status.clone());
@@ -126,26 +144,24 @@ impl AcpRuntime {
     }
 
     pub async fn send_prompt(&self, app: AppHandle, prompt: String) -> Result<(), String> {
-        let (session_id, transport) = {
+        let prompt_tx = {
             let active = self.active.lock();
-            let active = active
+            active
                 .as_ref()
-                .ok_or_else(|| "No active ACP agent session".to_string())?;
-            (active.session_id.clone(), active.transport.clone())
+                .ok_or_else(|| "No active ACP agent session".to_string())?
+                .prompt_tx
+                .clone()
         };
-
-        transport
-            .lock()
+        let (result_tx, result_rx) = oneshot::channel();
+        prompt_tx
+            .send(PromptCommand {
+                prompt,
+                result: result_tx,
+            })
+            .map_err(|_| "ACP agent prompt worker is not running".to_string())?;
+        result_rx
             .await
-            .write_json(&request(
-                self.request_ids.next(),
-                "session/prompt",
-                Some(json!({
-                    "sessionId": session_id,
-                    "prompt": prompt,
-                })),
-            ))
-            .await?;
+            .map_err(|_| "ACP agent prompt worker stopped before responding".to_string())??;
 
         emit_agent_event(&app, AgentEvent::status("Sent current sentence to agent"));
         Ok(())
@@ -156,31 +172,183 @@ impl AcpRuntime {
         confirmation_id: String,
         accepted: bool,
     ) -> Result<(), String> {
-        let transport = {
-            let active = self.active.lock();
-            let active = active
-                .as_ref()
-                .ok_or_else(|| "No active ACP agent session".to_string())?;
-            active.transport.clone()
-        };
-        let method = if accepted {
-            "confirmation/accept"
-        } else {
-            "confirmation/reject"
-        };
-        self.confirmations
-            .lock()
-            .insert(confirmation_id.clone(), method.into());
+        respond_pending_permission(&self.pending_permissions, &confirmation_id, accepted)
+    }
+}
 
-        let result = transport
-            .lock()
-            .await
-            .write_json(&notification(
-                method,
-                Some(json!({ "confirmationId": confirmation_id })),
-            ))
-            .await;
-        result
+async fn run_sdk_connection(
+    app: AppHandle,
+    profile: AgentProfile,
+    transport: super::transport::SdkTransport,
+    pending_permissions: PendingPermissions,
+    ready_tx: ReadySender,
+    shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(), String> {
+    let client = VoiceCodingAcpClient::new(app.clone(), pending_permissions);
+    let notification_client = client.clone();
+    let permission_client = client.clone();
+    let unsupported_app = app.clone();
+    let ready_tx = Arc::new(Mutex::new(Some(ready_tx)));
+
+    let result = Client
+        .builder()
+        .name("voice-coding")
+        .on_receive_notification(
+            async move |notification: SessionNotification, _cx| {
+                notification_client.handle_notification(notification).await;
+                Ok(())
+            },
+            agent_client_protocol::on_receive_notification!(),
+        )
+        .on_receive_request(
+            async move |request: RequestPermissionRequest, responder, _cx| {
+                permission_client
+                    .handle_permission_request(request, responder)
+                    .map_err(agent_client_protocol::util::internal_error)
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: WriteTextFileRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "fs.writeTextFile")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: ReadTextFileRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "fs.readTextFile")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: CreateTerminalRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "terminal.create")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: TerminalOutputRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "terminal.output")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: ReleaseTerminalRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "terminal.release")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: KillTerminalRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "terminal.kill")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = unsupported_app.clone();
+                async move |_request: WaitForTerminalExitRequest, responder, _cx| {
+                    reject_unsupported(&app, responder, "terminal.waitForExit")
+                }
+            },
+            agent_client_protocol::on_receive_request!(),
+        )
+        .connect_with(transport, {
+            let ready_tx = ready_tx.clone();
+            async move |connection: ConnectionTo<Agent>| {
+                connection
+                    .send_request(InitializeRequest::new(ProtocolVersion::V1))
+                    .block_task()
+                    .await?;
+
+                let cwd = profile.cwd.clone().unwrap_or(
+                    std::env::current_dir().map_err(agent_client_protocol::util::internal_error)?,
+                );
+                let session = connection
+                    .build_session(cwd)
+                    .block_task()
+                    .start_session()
+                    .await?;
+                let session_id = session.session_id().to_string();
+                let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+
+                if let Some(tx) = ready_tx.lock().take() {
+                    let _ = tx.send(Ok((session_id, prompt_tx)));
+                }
+
+                run_prompt_worker(session, prompt_rx, shutdown_rx).await
+            }
+        })
+        .await;
+
+    if let Err(err) = result {
+        if let Some(tx) = ready_tx.lock().take() {
+            let _ = tx.send(Err(err.to_string()));
+        }
+        return Err(err.to_string());
+    }
+
+    Ok(())
+}
+
+fn reject_unsupported<T: JsonRpcResponse>(
+    app: &AppHandle,
+    responder: Responder<T>,
+    capability: &str,
+) -> Result<(), agent_client_protocol::Error> {
+    let message = format!("ACP client capability '{capability}' is not supported");
+    emit_agent_event(app, AgentEvent::error(message.clone()));
+    responder.respond_with_internal_error(message)
+}
+
+async fn run_prompt_worker(
+    mut session: agent_client_protocol::ActiveSession<'static, Agent>,
+    mut prompt_rx: mpsc::UnboundedReceiver<PromptCommand>,
+    mut shutdown_rx: oneshot::Receiver<()>,
+) -> Result<(), agent_client_protocol::Error> {
+    loop {
+        tokio::select! {
+            _ = &mut shutdown_rx => return Ok(()),
+            command = prompt_rx.recv() => {
+                let Some(command) = command else {
+                    return Ok(());
+                };
+                let result = send_prompt_and_wait(&mut session, command.prompt).await;
+                let _ = command.result.send(result.map_err(|e| e.to_string()));
+            }
+        }
+    }
+}
+
+async fn send_prompt_and_wait(
+    session: &mut agent_client_protocol::ActiveSession<'static, Agent>,
+    prompt: String,
+) -> Result<(), agent_client_protocol::Error> {
+    session.send_prompt(prompt)?;
+    loop {
+        match session.read_update().await? {
+            agent_client_protocol::SessionMessage::StopReason(_) => return Ok(()),
+            agent_client_protocol::SessionMessage::SessionMessage(_) => {}
+            _ => {}
+        }
     }
 }
 
@@ -190,83 +358,6 @@ pub fn emit_agent_event(app: &AppHandle, event: AgentEvent) {
 
 pub fn emit_agent_status(app: &AppHandle, status: AgentStatus) {
     let _ = app.emit("agent-status", status);
-}
-
-fn normalize_line(line: &str) -> Result<AgentEvent, String> {
-    match parse_incoming(line)? {
-        IncomingMessage::Response(response) => {
-            if let Some(error) = response.error {
-                return Ok(AgentEvent::error(error.message));
-            }
-            Ok(AgentEvent::new(
-                AgentEventKind::Result,
-                Some("Response".into()),
-                stringify_value(response.result.unwrap_or(Value::Null)),
-                None,
-            ))
-        }
-        IncomingMessage::Notification(notification) => {
-            let params = notification.params.unwrap_or(Value::Null);
-            let content = content_from_params(&params);
-            let method = notification.method.to_ascii_lowercase();
-            let kind = kind_from_method(&method);
-            let confirmation_id = if kind == AgentEventKind::Confirm {
-                params
-                    .get("confirmationId")
-                    .or_else(|| params.get("id"))
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                    .or_else(|| Some(uuid::Uuid::new_v4().to_string()))
-            } else {
-                None
-            };
-            let mut event = AgentEvent::new(
-                kind,
-                Some(notification.method),
-                content,
-                confirmation_id,
-            );
-            if event.kind == AgentEventKind::Confirm {
-                event.confirm_status = Some("pending".into());
-            }
-            Ok(event)
-        }
-    }
-}
-
-fn kind_from_method(method: &str) -> AgentEventKind {
-    if method.contains("confirm") || method.contains("permission") {
-        AgentEventKind::Confirm
-    } else if method.contains("tool") || method.contains("call") {
-        AgentEventKind::Tool
-    } else if method.contains("diff") || method.contains("patch") {
-        AgentEventKind::Diff
-    } else if method.contains("thinking") || method.contains("reason") {
-        AgentEventKind::Thinking
-    } else if method.contains("error") {
-        AgentEventKind::Error
-    } else if method.contains("status") || method.contains("progress") {
-        AgentEventKind::Status
-    } else {
-        AgentEventKind::Result
-    }
-}
-
-fn content_from_params(params: &Value) -> String {
-    params
-        .get("text")
-        .or_else(|| params.get("content"))
-        .or_else(|| params.get("message"))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| stringify_value(params.clone()))
-}
-
-fn stringify_value(value: Value) -> String {
-    match value {
-        Value::String(text) => text,
-        other => serde_json::to_string_pretty(&other).unwrap_or_else(|_| String::new()),
-    }
 }
 
 #[tauri::command]
@@ -305,7 +396,9 @@ pub async fn respond_agent_confirmation(
     confirmation_id: String,
     accepted: bool,
 ) -> Result<(), String> {
-    runtime.respond_confirmation(confirmation_id, accepted).await
+    runtime
+        .respond_confirmation(confirmation_id, accepted)
+        .await
 }
 
 #[cfg(test)]
@@ -313,25 +406,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_tool_notification() {
-        let event = normalize_line(
-            r#"{"jsonrpc":"2.0","method":"tool/call","params":{"text":"run tests"}}"#,
-        )
-        .unwrap();
-
-        assert_eq!(event.kind, AgentEventKind::Tool);
-        assert_eq!(event.content, "run tests");
+    fn default_status_is_disconnected() {
+        assert_eq!(AcpRuntime::default().status(), AgentStatus::disconnected());
     }
 
-    #[test]
-    fn normalizes_confirmation_notification() {
-        let event = normalize_line(
-            r#"{"jsonrpc":"2.0","method":"confirm","params":{"confirmationId":"c1","message":"apply?"}}"#,
-        )
-        .unwrap();
+    #[tokio::test]
+    async fn rejects_unknown_confirmation_id() {
+        let runtime = AcpRuntime::default();
+        let err = runtime
+            .respond_confirmation("missing".into(), true)
+            .await
+            .unwrap_err();
 
-        assert_eq!(event.kind, AgentEventKind::Confirm);
-        assert_eq!(event.confirmation_id.as_deref(), Some("c1"));
-        assert_eq!(event.confirm_status.as_deref(), Some("pending"));
+        assert!(err.contains("Unknown ACP confirmation id"));
     }
 }

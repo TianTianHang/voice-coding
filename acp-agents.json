@@ -1,0 +1,15 @@
+{
+  "defaultProfile": "opencode",
+  "profiles": [
+    {
+      "id": "opencode",
+      "name": "OpenCode",
+      "command": "opencode",
+      "args": ["acp"],
+      "cwd": "/home/tiantian/project/voice-coding",
+      "env": {
+       
+      }
+    }
+  ]
+}
