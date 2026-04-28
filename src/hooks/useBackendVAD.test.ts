@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   appendTranscriptLine,
+  replaceCurrentUtterance,
   resolveSessionForVadStateEvent,
 } from "./useBackendVAD";
 
@@ -63,6 +64,14 @@ describe("resolveSessionForVadStateEvent", () => {
       nextAwaitingNewSession: false,
       shouldResetSessionData: false,
     });
+  });
+});
+
+describe("replaceCurrentUtterance", () => {
+  it("keeps only the latest utterance", () => {
+    expect(replaceCurrentUtterance("old command", "next command")).toBe(
+      "next command",
+    );
   });
 });
 

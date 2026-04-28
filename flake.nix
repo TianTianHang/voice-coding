@@ -165,6 +165,7 @@
             export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
             export STT_MODEL_DIR="$PWD/models"
             export LD_LIBRARY_PATH="${pkgs.onnxruntime}/lib:$LD_LIBRARY_PATH"
+            export LD_LIBRARY_PATH="${pkgs.libayatana-appindicator}/lib:$LD_LIBRARY_PATH"
             
             # LLVM C++ libraries for ten-vad
             export LD_LIBRARY_PATH="${pkgs.libcxx}/lib:$LD_LIBRARY_PATH"

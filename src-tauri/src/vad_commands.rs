@@ -206,10 +206,23 @@ pub async fn start_listening(
                     match transcribe_audio_internal(app_clone.clone(), audio_data).await {
                         Ok(text) => {
                             if is_session_active(&active_session, session_id) {
+                                let prompt = text.clone();
                                 let _ = app_clone.emit(
                                     "transcript",
                                     serde_json::json!({ "text": text, "sessionId": session_id }),
                                 );
+                                let runtime = app_clone.state::<crate::acp::AcpRuntime>();
+                                if let Err(e) = runtime
+                                    .send_prompt(app_clone.clone(), prompt)
+                                    .await
+                                {
+                                    crate::acp::session::emit_agent_event(
+                                        &app_clone,
+                                        crate::acp::AgentEvent::error(format!(
+                                            "Failed to send current sentence: {e}"
+                                        )),
+                                    );
+                                }
                             }
                         }
                         Err(e) => {
@@ -217,6 +230,10 @@ pub async fn start_listening(
                                 let _ = app_clone.emit(
                                     "error",
                                     serde_json::json!({ "message": e, "sessionId": session_id }),
+                                );
+                                crate::acp::session::emit_agent_event(
+                                    &app_clone,
+                                    crate::acp::AgentEvent::error("Speech transcription failed"),
                                 );
                             }
                         }

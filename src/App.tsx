@@ -1,12 +1,8 @@
-import { VoiceRecorder } from "./components/VoiceRecorder";
+import { AssistantConsole } from "./components/AssistantConsole";
 import "./App.css";
 
 function App() {
-  return (
-    <main className="container">
-      <VoiceRecorder />
-    </main>
-  );
+  return <AssistantConsole />;
 }
 
 export default App;

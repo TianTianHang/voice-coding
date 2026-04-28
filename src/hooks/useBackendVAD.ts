@@ -106,6 +106,10 @@ export function appendTranscriptLine(previous: string, nextText: string): string
   return previous ? `${previous}\n${nextText}` : nextText;
 }
 
+export function replaceCurrentUtterance(_previous: string, nextText: string): string {
+  return nextText;
+}
+
 export function useBackendVAD(): BackendVADResult {
   const [state, setState] = useState<VADState>("idle");
   const [transcript, setTranscript] = useState<string>("");
@@ -181,6 +185,10 @@ export function useBackendVAD(): BackendVADResult {
           } else {
             stopDurationTimer();
           }
+
+          if (newState === "listening") {
+            setTranscript("");
+          }
         }),
         listen<TranscriptEventPayload>("transcript", (event) => {
           if (!isMountedRef.current) {
@@ -193,7 +201,7 @@ export function useBackendVAD(): BackendVADResult {
           ) {
             return;
           }
-          setTranscript((prev) => appendTranscriptLine(prev, text));
+          setTranscript((prev) => replaceCurrentUtterance(prev, text));
         }),
         listen<ErrorEventPayload | string>("error", (event) => {
           if (!isMountedRef.current) {
