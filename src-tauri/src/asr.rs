@@ -1,20 +1,270 @@
-#[cfg(feature = "stt-qwen3")]
-use once_cell::sync::Lazy;
 use std::io::Write;
 use std::path::Path;
+#[cfg(feature = "stt-qwen3")]
+use std::sync::Arc;
 use stt_core::{AudioInput, SttConfig, SttEngine};
 #[cfg(feature = "stt-qwen3")]
-use stt_qwen3::Qwen3AsrEngine;
+use stt_qwen3::{Qwen3AsrEngine, Qwen3LoadTiming};
+#[cfg(feature = "stt-qwen3")]
+use tauri::{AppHandle, Emitter};
+#[cfg(feature = "stt-qwen3")]
+use tokio::sync::{Mutex, Notify};
 
 #[cfg(feature = "stt-qwen3")]
-static STT_ENGINE: Lazy<Qwen3AsrEngine> = Lazy::new(|| {
-    let model_dir = std::env::var("STT_MODEL_DIR").unwrap_or_else(|_| "models".to_string());
-    Qwen3AsrEngine::new(&model_dir).expect("Failed to initialize STT engine")
-});
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AsrLoadState {
+    Unloaded,
+    Loading,
+    Ready,
+    Failed,
+}
 
 #[cfg(feature = "stt-qwen3")]
-pub fn get_stt_engine() -> &'static Qwen3AsrEngine {
-    &STT_ENGINE
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AsrStatusSnapshot {
+    pub state: AsrLoadState,
+    pub engine_name: String,
+    pub model_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timing: Option<Qwen3LoadTiming>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[cfg(feature = "stt-qwen3")]
+type EngineLoader = dyn Fn(&str) -> Result<Qwen3AsrEngine, String> + Send + Sync;
+
+#[cfg(feature = "stt-qwen3")]
+struct AsrRuntimeInner {
+    snapshot: AsrStatusSnapshot,
+    engine: Option<Arc<Qwen3AsrEngine>>,
+    loading: Option<Arc<Notify>>,
+}
+
+#[cfg(feature = "stt-qwen3")]
+pub struct AsrRuntime {
+    inner: Mutex<AsrRuntimeInner>,
+    loader: Arc<EngineLoader>,
+}
+
+#[cfg(feature = "stt-qwen3")]
+impl AsrStatusSnapshot {
+    fn unloaded(model_dir: String) -> Self {
+        Self {
+            state: AsrLoadState::Unloaded,
+            engine_name: "qwen3-asr-0.6b".to_string(),
+            model_dir,
+            phase: None,
+            timing: None,
+            error: None,
+        }
+    }
+
+    fn loading(model_dir: String) -> Self {
+        Self {
+            state: AsrLoadState::Loading,
+            engine_name: "qwen3-asr-0.6b".to_string(),
+            model_dir,
+            phase: Some("model".to_string()),
+            timing: None,
+            error: None,
+        }
+    }
+
+    fn ready(model_dir: String, timing: Qwen3LoadTiming) -> Self {
+        Self {
+            state: AsrLoadState::Ready,
+            engine_name: "qwen3-asr-0.6b".to_string(),
+            model_dir,
+            phase: None,
+            timing: Some(timing),
+            error: None,
+        }
+    }
+
+    fn failed(model_dir: String, error: String) -> Self {
+        Self {
+            state: AsrLoadState::Failed,
+            engine_name: "qwen3-asr-0.6b".to_string(),
+            model_dir,
+            phase: None,
+            timing: None,
+            error: Some(error),
+        }
+    }
+}
+
+#[cfg(feature = "stt-qwen3")]
+impl AsrRuntime {
+    pub fn new() -> Self {
+        Self::new_with_loader(|model_dir| Qwen3AsrEngine::new(model_dir).map_err(|e| e.to_string()))
+    }
+
+    fn new_with_loader(
+        loader: impl Fn(&str) -> Result<Qwen3AsrEngine, String> + Send + Sync + 'static,
+    ) -> Self {
+        let model_dir = model_dir();
+        Self {
+            inner: Mutex::new(AsrRuntimeInner {
+                snapshot: AsrStatusSnapshot::unloaded(model_dir),
+                engine: None,
+                loading: None,
+            }),
+            loader: Arc::new(loader),
+        }
+    }
+
+    pub async fn status(&self) -> AsrStatusSnapshot {
+        self.inner.lock().await.snapshot.clone()
+    }
+
+    pub async fn prepare(&self, app: Option<AppHandle>) -> AsrStatusSnapshot {
+        loop {
+            let load = {
+                let mut inner = self.inner.lock().await;
+                match inner.snapshot.state {
+                    AsrLoadState::Ready => return inner.snapshot.clone(),
+                    AsrLoadState::Loading => {
+                        let notify = inner
+                            .loading
+                            .as_ref()
+                            .expect("loading notify exists")
+                            .clone();
+                        LoadAction::Wait(notify)
+                    }
+                    AsrLoadState::Unloaded | AsrLoadState::Failed => {
+                        let notify = Arc::new(Notify::new());
+                        let model_dir = model_dir();
+                        inner.engine = None;
+                        inner.loading = Some(notify.clone());
+                        inner.snapshot = AsrStatusSnapshot::loading(model_dir.clone());
+                        let snapshot = inner.snapshot.clone();
+                        drop(inner);
+                        emit_asr_status(app.as_ref(), &snapshot);
+                        LoadAction::Start { notify, model_dir }
+                    }
+                }
+            };
+
+            match load {
+                LoadAction::Wait(notify) => notify.notified().await,
+                LoadAction::Start { notify, model_dir } => {
+                    let loader = self.loader.clone();
+                    let load_model_dir = model_dir.clone();
+                    let load_result =
+                        tauri::async_runtime::spawn_blocking(move || loader(&load_model_dir))
+                            .await
+                            .map_err(|e| format!("ASR loader task failed: {}", e))
+                            .and_then(|result| result);
+
+                    let snapshot = {
+                        let mut inner = self.inner.lock().await;
+                        match load_result {
+                            Ok(engine) => {
+                                let timing = engine.load_timing();
+                                inner.engine = Some(Arc::new(engine));
+                                inner.snapshot = AsrStatusSnapshot::ready(model_dir, timing);
+                            }
+                            Err(error) => {
+                                inner.engine = None;
+                                inner.snapshot = AsrStatusSnapshot::failed(model_dir, error);
+                            }
+                        }
+                        inner.loading = None;
+                        let snapshot = inner.snapshot.clone();
+                        notify.notify_waiters();
+                        snapshot
+                    };
+
+                    emit_asr_status(app.as_ref(), &snapshot);
+                    return snapshot;
+                }
+            }
+        }
+    }
+
+    pub async fn ready_engine(
+        &self,
+        app: Option<AppHandle>,
+    ) -> Result<Arc<Qwen3AsrEngine>, String> {
+        loop {
+            let wait = {
+                let inner = self.inner.lock().await;
+                match inner.snapshot.state {
+                    AsrLoadState::Ready => {
+                        return inner.engine.clone().ok_or_else(|| {
+                            "ASR runtime is ready but no engine is available".to_string()
+                        });
+                    }
+                    AsrLoadState::Loading => Some(
+                        inner
+                            .loading
+                            .as_ref()
+                            .expect("loading notify exists")
+                            .clone(),
+                    ),
+                    AsrLoadState::Failed => {
+                        return Err(format!(
+                            "ASR model failed to load: {}",
+                            inner
+                                .snapshot
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| "unknown error".to_string())
+                        ));
+                    }
+                    AsrLoadState::Unloaded => None,
+                }
+            };
+
+            if let Some(notify) = wait {
+                notify.notified().await;
+            } else {
+                let snapshot = self.prepare(app.clone()).await;
+                if snapshot.state == AsrLoadState::Failed {
+                    return Err(format!(
+                        "ASR model failed to load: {}",
+                        snapshot
+                            .error
+                            .unwrap_or_else(|| "unknown error".to_string())
+                    ));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "stt-qwen3")]
+enum LoadAction {
+    Wait(Arc<Notify>),
+    Start {
+        notify: Arc<Notify>,
+        model_dir: String,
+    },
+}
+
+#[cfg(feature = "stt-qwen3")]
+static ASR_RUNTIME: once_cell::sync::Lazy<AsrRuntime> = once_cell::sync::Lazy::new(AsrRuntime::new);
+
+#[cfg(feature = "stt-qwen3")]
+fn model_dir() -> String {
+    std::env::var("STT_MODEL_DIR").unwrap_or_else(|_| "models".to_string())
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn emit_asr_status(app: Option<&AppHandle>, snapshot: &AsrStatusSnapshot) {
+    if let Some(app) = app {
+        let _ = app.emit("asr-status", snapshot);
+    }
+}
+
+#[cfg(feature = "stt-qwen3")]
+pub async fn get_stt_engine(app: Option<AppHandle>) -> Result<Arc<Qwen3AsrEngine>, String> {
+    ASR_RUNTIME.ready_engine(app).await
 }
 
 fn temp_dir() -> std::path::PathBuf {
@@ -34,6 +284,40 @@ fn cleanup_temp_audio_file(file_path: &Path) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn prepare_asr(app: tauri::AppHandle) -> Result<AsrStatusSnapshot, String> {
+    #[cfg(feature = "stt-qwen3")]
+    {
+        Ok(ASR_RUNTIME.prepare(Some(app)).await)
+    }
+
+    #[cfg(not(feature = "stt-qwen3"))]
+    {
+        let _ = app;
+        Err("STT engine not available: no engine feature enabled".into())
+    }
+}
+
+#[tauri::command]
+pub async fn get_asr_status() -> Result<AsrStatusSnapshot, String> {
+    #[cfg(feature = "stt-qwen3")]
+    {
+        Ok(ASR_RUNTIME.status().await)
+    }
+
+    #[cfg(not(feature = "stt-qwen3"))]
+    {
+        Err("STT engine not available: no engine feature enabled".into())
+    }
+}
+
+#[cfg(feature = "stt-qwen3")]
+pub fn prewarm_asr(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let _ = ASR_RUNTIME.prepare(Some(app)).await;
+    });
+}
+
+#[tauri::command]
 pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
@@ -43,7 +327,8 @@ pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<
             ..Default::default()
         };
 
-        let result = (*STT_ENGINE)
+        let engine = get_stt_engine(None).await?;
+        let result = engine
             .transcribe(input, config)
             .await
             .map_err(|e| e.to_string())?;
@@ -83,11 +368,15 @@ pub async fn transcribe_audio_data(
             ..Default::default()
         };
 
-        let transcription_result = (*STT_ENGINE)
-            .transcribe(input, config)
-            .await
-            .map(|result| result.text)
-            .map_err(|e| e.to_string());
+        let engine = get_stt_engine(None).await;
+        let transcription_result = match engine {
+            Ok(engine) => engine
+                .transcribe(input, config)
+                .await
+                .map(|result| result.text)
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e),
+        };
 
         let cleanup_result = cleanup_temp_audio_file(&file_path);
 
@@ -107,11 +396,13 @@ pub async fn transcribe_audio_data(
 
 #[cfg(test)]
 mod tests {
-    use super::cleanup_temp_audio_file;
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn cleanup_temp_audio_file_removes_existing_file() {
-        let temp_file = std::env::temp_dir().join(format!("voice-coding-test-{}.wav", uuid::Uuid::new_v4()));
+        let temp_file =
+            std::env::temp_dir().join(format!("voice-coding-test-{}.wav", uuid::Uuid::new_v4()));
         std::fs::write(&temp_file, b"wav").expect("failed to create temp file");
 
         let result = cleanup_temp_audio_file(&temp_file);
@@ -121,9 +412,162 @@ mod tests {
 
     #[test]
     fn cleanup_temp_audio_file_ignores_missing_file() {
-        let temp_file = std::env::temp_dir().join(format!("voice-coding-test-missing-{}.wav", uuid::Uuid::new_v4()));
+        let temp_file = std::env::temp_dir().join(format!(
+            "voice-coding-test-missing-{}.wav",
+            uuid::Uuid::new_v4()
+        ));
 
         let result = cleanup_temp_audio_file(&temp_file);
         assert!(result.is_ok());
+    }
+
+    #[cfg(feature = "stt-qwen3")]
+    #[tokio::test]
+    async fn runtime_starts_unloaded() {
+        let runtime = AsrRuntime::new_with_loader(|_| Err("not used".to_string()));
+
+        let status = runtime.status().await;
+
+        assert_eq!(status.state, AsrLoadState::Unloaded);
+        assert!(status.error.is_none());
+    }
+
+    #[cfg(feature = "stt-qwen3")]
+    #[tokio::test]
+    async fn runtime_failed_status_can_retry_loader() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let loader_calls = calls.clone();
+        let runtime = AsrRuntime::new_with_loader(move |_| {
+            loader_calls.fetch_add(1, Ordering::SeqCst);
+            Err("missing model".to_string())
+        });
+
+        let first = runtime.prepare(None).await;
+        let second = runtime.prepare(None).await;
+
+        assert_eq!(first.state, AsrLoadState::Failed);
+        assert_eq!(second.state, AsrLoadState::Failed);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(second.error.as_deref(), Some("missing model"));
+    }
+
+    #[cfg(feature = "stt-qwen3")]
+    #[tokio::test]
+    async fn ready_engine_returns_failed_state_error() {
+        let runtime = AsrRuntime::new_with_loader(|_| Err("bad load".to_string()));
+
+        let status = runtime.prepare(None).await;
+        let result = runtime.ready_engine(None).await;
+
+        assert_eq!(status.state, AsrLoadState::Failed);
+        assert_eq!(
+            result.err().expect("failed runtime should reject transcription"),
+            "ASR model failed to load: bad load"
+        );
+    }
+
+    #[cfg(feature = "stt-qwen3")]
+    #[tokio::test]
+    async fn prepare_reuses_inflight_loader_while_loading() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loader_calls = calls.clone();
+        let loader_release = release.clone();
+
+        let runtime = Arc::new(AsrRuntime::new_with_loader(move |_| {
+            loader_calls.fetch_add(1, Ordering::SeqCst);
+            while !loader_release.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err("load failed once".to_string())
+        }));
+
+        let runtime_one = runtime.clone();
+        let first = tokio::spawn(async move { runtime_one.prepare(None).await });
+
+        let mut seen_loading = false;
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) == 1 && runtime.status().await.state == AsrLoadState::Loading {
+                seen_loading = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(seen_loading);
+
+        let runtime_two = runtime.clone();
+        let second = tokio::spawn(async move { runtime_two.prepare(None).await });
+
+        for _ in 0..50 {
+            if calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        release.store(true, Ordering::SeqCst);
+
+        let first_status = first.await.expect("first prepare task panicked");
+        let second_status = second.await.expect("second prepare task panicked");
+
+        assert_eq!(first_status.state, AsrLoadState::Failed);
+        assert_eq!(second_status.state, AsrLoadState::Failed);
+        assert_eq!(first_status.error.as_deref(), Some("load failed once"));
+        assert_eq!(second_status.error.as_deref(), Some("load failed once"));
+        assert!(calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    #[cfg(feature = "stt-qwen3")]
+    #[tokio::test]
+    async fn ready_engine_waits_for_loading_and_uses_same_result() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let loader_calls = calls.clone();
+        let loader_release = release.clone();
+
+        let runtime = Arc::new(AsrRuntime::new_with_loader(move |_| {
+            loader_calls.fetch_add(1, Ordering::SeqCst);
+            while !loader_release.load(Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Err("load blocked failure".to_string())
+        }));
+
+        let prepare_runtime = runtime.clone();
+        let prepare_task = tokio::spawn(async move { prepare_runtime.prepare(None).await });
+
+        let mut seen_loading = false;
+        for _ in 0..200 {
+            if calls.load(Ordering::SeqCst) == 1 && runtime.status().await.state == AsrLoadState::Loading {
+                seen_loading = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(seen_loading);
+
+        let ready_runtime = runtime.clone();
+        let ready_task = tokio::spawn(async move { ready_runtime.ready_engine(None).await });
+
+        for _ in 0..50 {
+            if calls.load(Ordering::SeqCst) == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        release.store(true, Ordering::SeqCst);
+
+        let status = prepare_task.await.expect("prepare task panicked");
+        let ready_result = ready_task.await.expect("ready_engine task panicked");
+
+        assert_eq!(status.state, AsrLoadState::Failed);
+        match ready_result {
+            Ok(_) => panic!("ready_engine should fail after loader failure"),
+            Err(err) => assert_eq!(err, "ASR model failed to load: load blocked failure"),
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

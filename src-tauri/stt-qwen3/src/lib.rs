@@ -2,6 +2,7 @@ pub mod audio;
 pub mod decoder;
 pub mod encoder;
 pub mod models;
+mod output;
 pub mod prompt;
 pub mod tokenizer;
 
@@ -10,6 +11,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use log::info;
+use serde::{Deserialize, Serialize};
 use stt_core::{AudioInput, SttConfig, SttEngine, SttError, SttResult, TimingInfo};
 
 use audio::loader;
@@ -18,6 +21,7 @@ use audio::vad::{find_split_points, split_audio_at_points};
 use decoder::{decoder_init, embed_and_fuse, run_autoregressive_decode};
 use encoder::run_encoder;
 use models::session::{EmbeddingMatrix, OnnxSessions};
+use output::parse_qwen3_output;
 use prompt::build_prompt_ids;
 use tokenizer::wrapper::TokenizerWrapper;
 
@@ -26,21 +30,62 @@ const SUPPORTED_LANGUAGES: &[&str] = &[
     "tr", "hi", "ms", "nl", "sv", "da", "fi", "pl", "cz", "fil", "fa", "el", "ro", "hu", "mk",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Qwen3LoadTiming {
+    pub total_ms: u64,
+    pub onnx_sessions_ms: u64,
+    pub embeddings_ms: u64,
+    pub tokenizer_ms: u64,
+    pub mel_filterbank_ms: u64,
+}
+
 pub struct Qwen3AsrEngine {
     model_dir: String,
     sessions: Mutex<OnnxSessions>,
     embeddings: EmbeddingMatrix,
     tokenizer: TokenizerWrapper,
     mel_filterbank: Vec<Vec<f64>>,
+    load_timing: Qwen3LoadTiming,
 }
 
 impl Qwen3AsrEngine {
     pub fn new(model_dir: &str) -> Result<Self, SttError> {
+        let total_start = Instant::now();
         let path = Path::new(model_dir);
+
+        let onnx_start = Instant::now();
         let sessions = OnnxSessions::load(path)?;
+        let onnx_sessions_ms = elapsed_ms(onnx_start);
+
+        let embeddings_start = Instant::now();
         let embeddings = EmbeddingMatrix::load(path)?;
+        let embeddings_ms = elapsed_ms(embeddings_start);
+
+        let tokenizer_start = Instant::now();
         let tokenizer = TokenizerWrapper::load(path)?;
+        let tokenizer_ms = elapsed_ms(tokenizer_start);
+
+        let mel_start = Instant::now();
         let mel_filterbank = create_mel_filterbank();
+        let mel_filterbank_ms = elapsed_ms(mel_start);
+
+        let load_timing = Qwen3LoadTiming {
+            total_ms: elapsed_ms(total_start),
+            onnx_sessions_ms,
+            embeddings_ms,
+            tokenizer_ms,
+            mel_filterbank_ms,
+        };
+
+        info!(
+            "Qwen3 model loaded (total={}ms, onnx_sessions={}ms, embeddings={}ms, tokenizer={}ms, mel_filterbank={}ms)",
+            load_timing.total_ms,
+            load_timing.onnx_sessions_ms,
+            load_timing.embeddings_ms,
+            load_timing.tokenizer_ms,
+            load_timing.mel_filterbank_ms
+        );
 
         Ok(Self {
             model_dir: model_dir.to_string(),
@@ -48,7 +93,12 @@ impl Qwen3AsrEngine {
             embeddings,
             tokenizer,
             mel_filterbank,
+            load_timing,
         })
+    }
+
+    pub fn load_timing(&self) -> Qwen3LoadTiming {
+        self.load_timing
     }
 
     fn transcribe_samples(
@@ -92,25 +142,42 @@ impl Qwen3AsrEngine {
             )?
         };
 
-        let text = self.tokenizer.decode(&generated_tokens)?;
+        let decoded_text = self.tokenizer.decode(&generated_tokens)?;
 
         let processing_time = start.elapsed().as_secs_f64();
-        let rtf = processing_time / audio_duration;
+        Ok(stt_result_from_decoded_output(
+            &decoded_text,
+            config,
+            audio_duration,
+            processing_time,
+            generated_tokens.len(),
+        ))
+    }
+}
 
-        Ok(SttResult {
-            text,
-            language: config
-                .language
-                .clone()
-                .unwrap_or_else(|| "auto".to_string()),
-            confidence: None,
-            timing: TimingInfo {
-                audio_duration_sec: audio_duration,
-                processing_time_sec: processing_time,
-                rtf,
-                tokens_generated: Some(generated_tokens.len()),
-            },
-        })
+fn elapsed_ms(start: Instant) -> u64 {
+    start.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
+fn stt_result_from_decoded_output(
+    decoded_text: &str,
+    config: &SttConfig,
+    audio_duration: f64,
+    processing_time: f64,
+    tokens_generated: usize,
+) -> SttResult {
+    let parsed = parse_qwen3_output(decoded_text, config.language.as_deref());
+
+    SttResult {
+        text: parsed.text,
+        language: parsed.language,
+        confidence: None,
+        timing: TimingInfo {
+            audio_duration_sec: audio_duration,
+            processing_time_sec: processing_time,
+            rtf: processing_time / audio_duration,
+            tokens_generated: Some(tokens_generated),
+        },
     }
 }
 
@@ -158,25 +225,31 @@ impl SttEngine for Qwen3AsrEngine {
             let chunks = split_audio_at_points(&samples, &split_points);
 
             let mut full_text = String::new();
+            let mut language = config
+                .language
+                .clone()
+                .unwrap_or_else(|| "auto".to_string());
             let mut total_processing = 0.0;
             let mut total_tokens = 0;
 
             for chunk in chunks {
                 let result = self.transcribe_samples(chunk, &config)?;
-                if !full_text.is_empty() {
-                    full_text.push(' ');
+                if !result.text.is_empty() {
+                    if !full_text.is_empty() {
+                        full_text.push(' ');
+                    }
+                    full_text.push_str(&result.text);
                 }
-                full_text.push_str(&result.text);
+                if config.language.is_none() && language == "auto" && result.language != "auto" {
+                    language = result.language;
+                }
                 total_processing += result.timing.processing_time_sec;
                 total_tokens += result.timing.tokens_generated.unwrap_or(0);
             }
 
             Ok(SttResult {
                 text: full_text,
-                language: config
-                    .language
-                    .clone()
-                    .unwrap_or_else(|| "auto".to_string()),
+                language,
                 confidence: None,
                 timing: TimingInfo {
                     audio_duration_sec: duration,
@@ -211,5 +284,51 @@ impl SttEngine for Qwen3AsrEngine {
         }
 
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stt_result_uses_parsed_auto_output() {
+        let result = stt_result_from_decoded_output(
+            "language English<asr_text>  parsed text  ",
+            &SttConfig::default(),
+            2.0,
+            1.0,
+            10,
+        );
+
+        assert_eq!(result.text, "parsed text");
+        assert_eq!(result.language, "en");
+        assert_eq!(result.timing.tokens_generated, Some(10));
+    }
+
+    #[test]
+    fn stt_result_preserves_forced_language_output() {
+        let config = SttConfig {
+            language: Some("zh".to_string()),
+            ..Default::default()
+        };
+
+        let result = stt_result_from_decoded_output(
+            "language English<asr_text>  parsed text  ",
+            &config,
+            2.0,
+            1.0,
+            10,
+        );
+
+        assert_eq!(result.text, "language English<asr_text>  parsed text");
+        assert_eq!(result.language, "zh");
+    }
+
+    #[test]
+    fn elapsed_ms_saturates_to_u64() {
+        let elapsed = elapsed_ms(Instant::now());
+
+        assert!(elapsed < 1_000);
     }
 }

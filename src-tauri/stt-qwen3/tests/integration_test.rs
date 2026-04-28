@@ -1,8 +1,19 @@
 use std::path::Path;
 use stt_core::{AudioInput, SttConfig, SttEngine};
 
+fn model_tests_enabled() -> bool {
+    std::env::var("RUN_QWEN3_MODEL_TESTS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
 #[tokio::test]
 async fn test_stt_qwen3() -> Result<(), Box<dyn std::error::Error>> {
+    if !model_tests_enabled() {
+        eprintln!("Skipping model inference test; set RUN_QWEN3_MODEL_TESTS=1 to enable");
+        return Ok(());
+    }
+
     println!("🎙️  STT Engine Integration Test");
     println!("==============================\n");
 

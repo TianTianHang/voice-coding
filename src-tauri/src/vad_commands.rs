@@ -123,7 +123,7 @@ async fn transcribe_audio_internal(
             ..Default::default()
         };
 
-        let engine = crate::asr::get_stt_engine();
+        let engine = crate::asr::get_stt_engine(Some(_app)).await?;
         let result = engine
             .transcribe(input, config)
             .await

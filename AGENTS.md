@@ -25,22 +25,25 @@ pnpm test <pattern>   # Run tests matching a pattern (single test)
 ```
 
 ### Backend (Rust/Tauri)
+> IMPORTANT: Run Rust commands inside the Nix dev shell to ensure linker/toolchain consistency.
+> Prefer `nix develop -c <command>` for all Cargo operations.
+
 ```bash
 # Development
-pnpm tauri dev        # Start Tauri in dev mode
+nix develop -c pnpm tauri dev        # Start Tauri in dev mode
 
 # Build
-pnpm tauri build      # Build production app
+nix develop -c pnpm tauri build      # Build production app
 
 # Test
-cargo test            # Run all Rust tests (workspace)
-cargo test <test_name># Run a single test by name
-cargo test -p stt-qwen3           # Test specific package
-cargo test -p stt-qwen3 --test integration_test  # Run specific test file
+nix develop -c cargo test            # Run all Rust tests (workspace)
+nix develop -c cargo test <test_name># Run a single test by name
+nix develop -c cargo test -p stt-qwen3           # Test specific package
+nix develop -c cargo test -p stt-qwen3 --test integration_test  # Run specific test file
 
 # Lint
-cargo clippy          # Run Rust linter
-cargo clippy --fix    # Auto-fix linting issues
+nix develop -c cargo clippy          # Run Rust linter
+nix develop -c cargo clippy --fix    # Auto-fix linting issues
 ```
 
 ### Python Scripts

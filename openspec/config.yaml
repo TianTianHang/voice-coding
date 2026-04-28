@@ -4,6 +4,8 @@ schema: spec-driven
 # This is shown to AI when creating artifacts.
 # Add your tech stack, conventions, style guides, domain knowledge, etc.
 context: |
+  语言：中文（简体）
+  所有产出物必须用简体中文撰写。
   Tech stack: Tauri v2, React 19, TypeScript, Rust, Python
   Frontend: React 19 with TypeScript, Vite build tool, pnpm package manager
   Backend: Rust (Tauri) with Qwen3 ASR engine for speech recognition

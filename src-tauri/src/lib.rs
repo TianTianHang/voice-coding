@@ -13,8 +13,15 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(vad_commands::VadRecorderState::new())
+        .setup(|app| {
+            #[cfg(feature = "stt-qwen3")]
+            asr::prewarm_asr(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
+            asr::prepare_asr,
+            asr::get_asr_status,
             asr::transcribe,
             asr::transcribe_audio_data,
             vad_commands::start_listening,
