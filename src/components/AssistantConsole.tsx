@@ -72,6 +72,41 @@ export function AssistantConsole() {
           </div>
         </section>
 
+        <section className="agent-session-summary" aria-label="Agent session">
+          <div className="session-summary-item">
+            <span className="section-label">Mode</span>
+            <strong>{agent.sessionState.currentModeId ?? "Default"}</strong>
+          </div>
+          <div className="session-summary-item">
+            <span className="section-label">Session</span>
+            <strong>{agent.sessionState.sessionInfo.title ?? "Untitled"}</strong>
+          </div>
+          <div className="session-summary-item">
+            <span className="section-label">Commands</span>
+            <strong>{agent.sessionState.availableCommands.length}</strong>
+          </div>
+          <div className="session-summary-item">
+            <span className="section-label">Config</span>
+            <strong>{agent.sessionState.configOptions.length}</strong>
+          </div>
+        </section>
+
+        {agent.plan && agent.plan.entries.length > 0 && (
+          <section className="agent-plan" aria-label="Agent plan">
+            <div className="section-label">Current plan</div>
+            <ol>
+              {agent.plan.entries.map((entry, index) => (
+                <li className={`plan-entry plan-entry-${entry.status}`} key={index}>
+                  <span>{entry.content}</span>
+                  <small>
+                    {entry.priority} · {entry.status.replace("_", " ")}
+                  </small>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
         <section className="control-row">
           <ControlButton
             state={state}

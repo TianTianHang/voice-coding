@@ -1,7 +1,9 @@
 use agent_client_protocol::schema::{
-    ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionOutcome,
-    RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
-    SessionNotification, SessionUpdate,
+    AvailableCommandInput, ConfigOptionUpdate, ContentBlock, ContentChunk, CurrentModeUpdate,
+    EmbeddedResourceResource, PermissionOption, PermissionOptionKind, Plan,
+    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
+    SelectedPermissionOutcome, SessionInfoUpdate, SessionNotification, SessionUpdate, ToolCall,
+    ToolCallContent, ToolCallUpdate, ToolCallUpdateFields,
 };
 use agent_client_protocol::Responder;
 use parking_lot::Mutex;
@@ -9,7 +11,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::AppHandle;
 
-use super::events::{AgentEvent, AgentEventKind};
+use super::events::{
+    AgentAvailableCommand, AgentContentBlock, AgentDiff, AgentEvent, AgentEventKind,
+    AgentEventOperation, AgentPlanEntry, AgentPlanSnapshot, AgentSessionInfo,
+    AgentSessionStateUpdate, AgentTerminalRef, AgentToolContent, AgentToolLocation,
+    AgentToolPayload,
+};
 use super::session::emit_agent_event;
 
 pub type PendingPermissions = Arc<Mutex<HashMap<String, PendingPermission>>>;
@@ -92,48 +99,298 @@ pub fn respond_pending_permission(
 }
 
 pub fn event_from_notification(notification: SessionNotification) -> AgentEvent {
-    let (kind, title, content) = describe_update(&notification.update);
-    AgentEvent::new(kind, title, content, None)
+    event_from_update(&notification.update)
 }
 
-fn describe_update(update: &SessionUpdate) -> (AgentEventKind, Option<String>, String) {
+fn event_from_update(update: &SessionUpdate) -> AgentEvent {
     match update {
-        SessionUpdate::AgentMessageChunk(chunk) => (
-            AgentEventKind::Result,
-            None,
-            content_block_text(&chunk.content).unwrap_or_else(|| stringify(update)),
+        SessionUpdate::UserMessageChunk(chunk) => text_chunk_event(
+            AgentEventKind::Status,
+            Some("User message".into()),
+            chunk,
+            update,
         ),
-        SessionUpdate::AgentThoughtChunk(chunk) => (
+        SessionUpdate::AgentMessageChunk(chunk) => {
+            text_chunk_event(AgentEventKind::Result, None, chunk, update)
+        }
+        SessionUpdate::AgentThoughtChunk(chunk) => text_chunk_event(
             AgentEventKind::Thinking,
             Some("Thinking".into()),
-            content_block_text(&chunk.content).unwrap_or_else(|| stringify(update)),
+            chunk,
+            update,
         ),
-        SessionUpdate::ToolCall(tool_call) => (
-            AgentEventKind::Tool,
-            Some("Tool call".into()),
-            stringify(tool_call),
+        SessionUpdate::ToolCall(tool_call) => tool_call_event(tool_call),
+        SessionUpdate::ToolCallUpdate(tool_call) => tool_call_update_event(tool_call),
+        SessionUpdate::Plan(plan) => plan_event(plan),
+        SessionUpdate::AvailableCommandsUpdate(commands) => session_state_event(
+            "Available commands updated",
+            AgentSessionStateUpdate {
+                available_commands: commands
+                    .available_commands
+                    .iter()
+                    .map(|command| AgentAvailableCommand {
+                        name: command.name.clone(),
+                        description: command.description.clone(),
+                        input_hint: command.input.as_ref().map(command_input_hint),
+                    })
+                    .collect(),
+                current_mode_id: None,
+                config_options: Vec::new(),
+                session_info: None,
+            },
+            commands,
         ),
-        SessionUpdate::ToolCallUpdate(tool_call) => (
-            AgentEventKind::Tool,
-            Some("Tool update".into()),
-            stringify(tool_call),
+        SessionUpdate::CurrentModeUpdate(mode) => current_mode_event(mode),
+        SessionUpdate::ConfigOptionUpdate(config) => config_event(config),
+        SessionUpdate::SessionInfoUpdate(info) => session_info_event(info),
+        other => fallback_event(other),
+    }
+}
+
+fn text_chunk_event(
+    kind: AgentEventKind,
+    title: Option<String>,
+    chunk: &ContentChunk,
+    raw_update: &SessionUpdate,
+) -> AgentEvent {
+    let block = content_block_payload(&chunk.content);
+    let content = content_block_text(&chunk.content).unwrap_or_else(|| block.summary.clone());
+    let mut event = AgentEvent::new(kind, title, content, None)
+        .with_message_id(chunk.message_id.clone())
+        .with_operation(AgentEventOperation::Append);
+    event.content_blocks = vec![block];
+    event.raw = Some(to_value(raw_update));
+    event
+}
+
+fn tool_call_event(tool_call: &ToolCall) -> AgentEvent {
+    let tool = tool_call_payload(tool_call);
+    let mut event = AgentEvent::new(
+        AgentEventKind::Tool,
+        Some(tool_call.title.clone()),
+        tool_summary(&tool),
+        None,
+    )
+    .with_tool_call_id(Some(tool.tool_call_id.clone()))
+    .with_operation(AgentEventOperation::Create);
+    event.tool = Some(tool);
+    event.raw = Some(to_value(tool_call));
+    event
+}
+
+fn tool_call_update_event(update: &ToolCallUpdate) -> AgentEvent {
+    let tool = tool_call_update_payload(update);
+    let mut event = AgentEvent::new(
+        AgentEventKind::Tool,
+        tool.title.clone().or_else(|| Some("Tool update".into())),
+        tool_summary(&tool),
+        None,
+    )
+    .with_tool_call_id(Some(tool.tool_call_id.clone()))
+    .with_operation(AgentEventOperation::Update);
+    event.tool = Some(tool);
+    event.raw = Some(to_value(update));
+    event
+}
+
+fn plan_event(plan: &Plan) -> AgentEvent {
+    let snapshot = AgentPlanSnapshot {
+        entries: plan
+            .entries
+            .iter()
+            .map(|entry| AgentPlanEntry {
+                content: entry.content.clone(),
+                priority: json_string(&entry.priority),
+                status: json_string(&entry.status),
+            })
+            .collect(),
+    };
+    let mut event = AgentEvent::new(
+        AgentEventKind::Status,
+        Some("Plan".into()),
+        format!("Plan updated: {} entries", snapshot.entries.len()),
+        None,
+    )
+    .with_operation(AgentEventOperation::Replace);
+    event.plan = Some(snapshot);
+    event.raw = Some(to_value(plan));
+    event
+}
+
+fn current_mode_event(mode: &CurrentModeUpdate) -> AgentEvent {
+    session_state_event(
+        &format!("Current mode: {}", mode.current_mode_id),
+        AgentSessionStateUpdate {
+            available_commands: Vec::new(),
+            current_mode_id: Some(mode.current_mode_id.to_string()),
+            config_options: Vec::new(),
+            session_info: None,
+        },
+        mode,
+    )
+}
+
+fn config_event(config: &ConfigOptionUpdate) -> AgentEvent {
+    session_state_event(
+        &format!(
+            "Configuration updated: {} options",
+            config.config_options.len()
         ),
-        SessionUpdate::Plan(plan) => (AgentEventKind::Status, Some("Plan".into()), stringify(plan)),
-        SessionUpdate::CurrentModeUpdate(mode) => (
-            AgentEventKind::Status,
-            Some("Mode".into()),
-            format!("Current mode: {}", mode.current_mode_id),
-        ),
-        SessionUpdate::SessionInfoUpdate(info) => (
-            AgentEventKind::Status,
-            Some("Session".into()),
-            stringify(info),
-        ),
-        other => (
-            AgentEventKind::Status,
-            Some("Update".into()),
-            stringify(other),
-        ),
+        AgentSessionStateUpdate {
+            available_commands: Vec::new(),
+            current_mode_id: None,
+            config_options: config.config_options.iter().map(to_value).collect(),
+            session_info: None,
+        },
+        config,
+    )
+}
+
+fn session_info_event(info: &SessionInfoUpdate) -> AgentEvent {
+    let state = AgentSessionStateUpdate {
+        available_commands: Vec::new(),
+        current_mode_id: None,
+        config_options: Vec::new(),
+        session_info: Some(AgentSessionInfo {
+            title: info.title.as_opt_ref().map(|value| value.cloned()),
+            updated_at: info.updated_at.as_opt_ref().map(|value| value.cloned()),
+        }),
+    };
+    session_state_event("Session info updated", state, info)
+}
+
+fn session_state_event(
+    content: &str,
+    session_state: AgentSessionStateUpdate,
+    raw: &impl serde::Serialize,
+) -> AgentEvent {
+    let mut event = AgentEvent::new(
+        AgentEventKind::Status,
+        Some("Session state".into()),
+        content,
+        None,
+    )
+    .with_operation(AgentEventOperation::SessionState);
+    event.session_state = Some(session_state);
+    event.raw = Some(to_value(raw));
+    event
+}
+
+fn fallback_event(raw: &impl serde::Serialize) -> AgentEvent {
+    let mut event = AgentEvent::new(
+        AgentEventKind::Status,
+        Some("Unknown update".into()),
+        stringify(raw),
+        None,
+    )
+    .with_operation(AgentEventOperation::Fallback);
+    event.raw = Some(to_value(raw));
+    event
+}
+
+fn tool_call_payload(tool_call: &ToolCall) -> AgentToolPayload {
+    AgentToolPayload {
+        tool_call_id: tool_call.tool_call_id.to_string(),
+        title: Some(tool_call.title.clone()),
+        kind: Some(json_string(&tool_call.kind)),
+        status: Some(json_string(&tool_call.status)),
+        content: tool_call.content.iter().map(tool_content_payload).collect(),
+        locations: tool_call
+            .locations
+            .iter()
+            .map(|location| AgentToolLocation {
+                path: location.path.display().to_string(),
+                line: location.line,
+            })
+            .collect(),
+        raw_input: tool_call.raw_input.clone(),
+        raw_output: tool_call.raw_output.clone(),
+    }
+}
+
+fn tool_call_update_payload(update: &ToolCallUpdate) -> AgentToolPayload {
+    let ToolCallUpdateFields {
+        kind,
+        status,
+        title,
+        content,
+        locations,
+        raw_input,
+        raw_output,
+        ..
+    } = &update.fields;
+
+    AgentToolPayload {
+        tool_call_id: update.tool_call_id.to_string(),
+        title: title.clone(),
+        kind: kind.as_ref().map(json_string),
+        status: status.as_ref().map(json_string),
+        content: content
+            .as_ref()
+            .map(|items| items.iter().map(tool_content_payload).collect())
+            .unwrap_or_default(),
+        locations: locations
+            .as_ref()
+            .map(|items| {
+                items
+                    .iter()
+                    .map(|location| AgentToolLocation {
+                        path: location.path.display().to_string(),
+                        line: location.line,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        raw_input: raw_input.clone(),
+        raw_output: raw_output.clone(),
+    }
+}
+
+fn tool_content_payload(content: &ToolCallContent) -> AgentToolContent {
+    match content {
+        ToolCallContent::Content(content) => {
+            let block = content_block_payload(&content.content);
+            AgentToolContent {
+                kind: block.kind.clone(),
+                summary: block.summary.clone(),
+                content: Some(block),
+                diff: None,
+                terminal: None,
+            }
+        }
+        ToolCallContent::Diff(diff) => {
+            let payload = AgentDiff {
+                path: diff.path.display().to_string(),
+                old_text: diff.old_text.clone(),
+                new_text: diff.new_text.clone(),
+            };
+            AgentToolContent {
+                kind: "diff".into(),
+                summary: format!("Diff: {}", payload.path),
+                content: None,
+                diff: Some(payload),
+                terminal: None,
+            }
+        }
+        ToolCallContent::Terminal(terminal) => {
+            let payload = AgentTerminalRef {
+                terminal_id: terminal.terminal_id.to_string(),
+            };
+            AgentToolContent {
+                kind: "terminal".into(),
+                summary: format!("Terminal: {}", payload.terminal_id),
+                content: None,
+                diff: None,
+                terminal: Some(payload),
+            }
+        }
+        other => AgentToolContent {
+            kind: "unknown".into(),
+            summary: stringify(other),
+            content: None,
+            diff: None,
+            terminal: None,
+        },
     }
 }
 
@@ -142,6 +399,115 @@ fn content_block_text(content: &ContentBlock) -> Option<String> {
         ContentBlock::Text(text) => Some(text.text.clone()),
         _ => None,
     }
+}
+
+fn content_block_payload(content: &ContentBlock) -> AgentContentBlock {
+    match content {
+        ContentBlock::Text(text) => AgentContentBlock {
+            kind: "text".into(),
+            summary: text.text.clone(),
+            text: Some(text.text.clone()),
+            mime_type: None,
+            uri: None,
+            name: None,
+            raw: Some(to_value(content)),
+        },
+        ContentBlock::Image(image) => AgentContentBlock {
+            kind: "image".into(),
+            summary: format!(
+                "Image content ({}){}",
+                image.mime_type,
+                image
+                    .uri
+                    .as_ref()
+                    .map(|uri| format!(": {uri}"))
+                    .unwrap_or_default()
+            ),
+            text: None,
+            mime_type: Some(image.mime_type.clone()),
+            uri: image.uri.clone(),
+            name: None,
+            raw: Some(to_value(content)),
+        },
+        ContentBlock::Audio(audio) => AgentContentBlock {
+            kind: "audio".into(),
+            summary: format!("Audio content ({})", audio.mime_type),
+            text: None,
+            mime_type: Some(audio.mime_type.clone()),
+            uri: None,
+            name: None,
+            raw: Some(to_value(content)),
+        },
+        ContentBlock::ResourceLink(resource) => AgentContentBlock {
+            kind: "resourceLink".into(),
+            summary: format!("Resource link: {} ({})", resource.name, resource.uri),
+            text: None,
+            mime_type: resource.mime_type.clone(),
+            uri: Some(resource.uri.clone()),
+            name: Some(resource.name.clone()),
+            raw: Some(to_value(content)),
+        },
+        ContentBlock::Resource(resource) => match &resource.resource {
+            EmbeddedResourceResource::TextResourceContents(text) => AgentContentBlock {
+                kind: "resource".into(),
+                summary: format!("Embedded text resource: {}", text.uri),
+                text: Some(text.text.clone()),
+                mime_type: text.mime_type.clone(),
+                uri: Some(text.uri.clone()),
+                name: None,
+                raw: Some(to_value(content)),
+            },
+            EmbeddedResourceResource::BlobResourceContents(blob) => AgentContentBlock {
+                kind: "resource".into(),
+                summary: format!("Embedded binary resource: {}", blob.uri),
+                text: None,
+                mime_type: blob.mime_type.clone(),
+                uri: Some(blob.uri.clone()),
+                name: None,
+                raw: Some(to_value(content)),
+            },
+            other => AgentContentBlock {
+                kind: "resource".into(),
+                summary: stringify(other),
+                text: None,
+                mime_type: None,
+                uri: None,
+                name: None,
+                raw: Some(to_value(content)),
+            },
+        },
+        other => AgentContentBlock {
+            kind: "unknown".into(),
+            summary: stringify(other),
+            text: None,
+            mime_type: None,
+            uri: None,
+            name: None,
+            raw: Some(to_value(content)),
+        },
+    }
+}
+
+fn tool_summary(tool: &AgentToolPayload) -> String {
+    let mut parts = Vec::new();
+    if let Some(status) = &tool.status {
+        parts.push(format!("status: {status}"));
+    }
+    if let Some(kind) = &tool.kind {
+        parts.push(format!("kind: {kind}"));
+    }
+    parts.extend(tool.content.iter().map(|content| content.summary.clone()));
+    if parts.is_empty() {
+        tool.title
+            .clone()
+            .unwrap_or_else(|| format!("Tool {}", tool.tool_call_id))
+    } else {
+        parts.join("\n")
+    }
+}
+
+fn command_input_hint(input: &AvailableCommandInput) -> String {
+    stringify(input)
 }
 
 fn permission_content(request: &RequestPermissionRequest) -> String {
@@ -187,6 +553,17 @@ fn stringify<T: serde::Serialize>(value: &T) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| String::new())
 }
 
+fn to_value<T: serde::Serialize>(value: &T) -> serde_json::Value {
+    serde_json::to_value(value).unwrap_or(serde_json::Value::Null)
+}
+
+fn json_string<T: serde::Serialize>(value: &T) -> String {
+    match to_value(value) {
+        serde_json::Value::String(value) => value,
+        value => value.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,12 +575,18 @@ mod tests {
     fn maps_result_notification_text() {
         let event = event_from_notification(SessionNotification::new(
             SessionId::new("s1"),
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::Text(
-                TextContent::new("done"),
-            ))),
+            SessionUpdate::AgentMessageChunk(
+                ContentChunk::new(ContentBlock::Text(TextContent::new("done")))
+                    .message_id(Some("550e8400-e29b-41d4-a716-446655440000".into())),
+            ),
         ));
 
         assert_eq!(event.kind, AgentEventKind::Result);
+        assert_eq!(event.operation, Some(AgentEventOperation::Append));
+        assert_eq!(
+            event.message_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
         assert_eq!(event.content, "done");
     }
 
@@ -221,6 +604,143 @@ mod tests {
         let event = event_from_notification(notification);
 
         assert_eq!(event.kind, AgentEventKind::Tool);
+        assert_eq!(event.tool_call_id.as_deref(), Some("t1"));
+        assert_eq!(event.operation, Some(AgentEventOperation::Create));
+        assert_eq!(event.tool.as_ref().unwrap().title.as_deref(), Some("Run tests"));
+    }
+
+    #[test]
+    fn maps_user_and_thought_chunks() {
+        let user = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "user_message_chunk",
+            "content": { "type": "text", "text": "hello" },
+            "messageId": "550e8400-e29b-41d4-a716-446655440001"
+        })));
+        let thought = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": { "type": "text", "text": "hmm" },
+            "messageId": "550e8400-e29b-41d4-a716-446655440002"
+        })));
+
+        assert_eq!(user.kind, AgentEventKind::Status);
+        assert_eq!(user.operation, Some(AgentEventOperation::Append));
+        assert_eq!(user.message_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440001"));
+        assert_eq!(thought.kind, AgentEventKind::Thinking);
+        assert_eq!(thought.operation, Some(AgentEventOperation::Append));
+        assert_eq!(thought.message_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440002"));
+    }
+
+    #[test]
+    fn maps_tool_update_and_content_variants() {
+        let event = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-1",
+            "title": "Edit file",
+            "kind": "edit",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "content",
+                    "content": { "type": "image", "data": "abc", "mimeType": "image/png", "uri": "file:///tmp/a.png" }
+                },
+                {
+                    "type": "diff",
+                    "path": "src/main.rs",
+                    "oldText": "old",
+                    "newText": "new"
+                },
+                {
+                    "type": "terminal",
+                    "terminalId": "term-1"
+                }
+            ],
+            "locations": [{ "path": "src/main.rs", "line": 7 }],
+            "rawInput": { "path": "src/main.rs" },
+            "rawOutput": { "ok": true }
+        })));
+
+        let tool = event.tool.as_ref().unwrap();
+        assert_eq!(event.kind, AgentEventKind::Tool);
+        assert_eq!(event.operation, Some(AgentEventOperation::Update));
+        assert_eq!(tool.tool_call_id, "tool-1");
+        assert_eq!(tool.kind.as_deref(), Some("edit"));
+        assert_eq!(tool.status.as_deref(), Some("completed"));
+        assert_eq!(tool.locations[0].path, "src/main.rs");
+        assert_eq!(tool.content[0].kind, "image");
+        assert_eq!(tool.content[1].diff.as_ref().unwrap().path, "src/main.rs");
+        assert_eq!(
+            tool.content[2].terminal.as_ref().unwrap().terminal_id,
+            "term-1"
+        );
+    }
+
+    #[test]
+    fn maps_plan_snapshot() {
+        let event = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "plan",
+            "entries": [
+                { "content": "Implement", "priority": "high", "status": "in_progress" },
+                { "content": "Verify", "priority": "medium", "status": "pending" }
+            ]
+        })));
+
+        assert_eq!(event.operation, Some(AgentEventOperation::Replace));
+        let plan = event.plan.as_ref().unwrap();
+        assert_eq!(plan.entries.len(), 2);
+        assert_eq!(plan.entries[0].priority, "high");
+        assert_eq!(plan.entries[0].status, "in_progress");
+    }
+
+    #[test]
+    fn maps_session_state_updates() {
+        let commands = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "available_commands_update",
+            "availableCommands": [
+                { "name": "create_plan", "description": "Create a plan" }
+            ]
+        })));
+        let mode = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "current_mode_update",
+            "currentModeId": "build"
+        })));
+        let config = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "config_option_update",
+            "configOptions": []
+        })));
+        let info = event_from_notification(notification_json(serde_json::json!({
+            "sessionUpdate": "session_info_update",
+            "title": "Voice task",
+            "updatedAt": "2026-04-28T00:00:00Z"
+        })));
+
+        assert_eq!(commands.operation, Some(AgentEventOperation::SessionState));
+        assert_eq!(
+            commands.session_state.as_ref().unwrap().available_commands[0].name,
+            "create_plan"
+        );
+        assert_eq!(
+            mode.session_state.as_ref().unwrap().current_mode_id.as_deref(),
+            Some("build")
+        );
+        assert!(config
+            .session_state
+            .as_ref()
+            .unwrap()
+            .config_options
+            .is_empty());
+        assert_eq!(
+            info.session_state
+                .as_ref()
+                .unwrap()
+                .session_info
+                .as_ref()
+                .unwrap()
+                .title
+                .as_ref()
+                .unwrap()
+                .as_deref(),
+            Some("Voice task")
+        );
     }
 
     #[test]
@@ -232,5 +752,13 @@ mod tests {
 
         assert_eq!(allow.as_deref(), Some("allow"));
         assert_eq!(reject.as_deref(), Some("reject"));
+    }
+
+    fn notification_json(update: serde_json::Value) -> SessionNotification {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": "s1",
+            "update": update,
+        }))
+        .unwrap()
     }
 }

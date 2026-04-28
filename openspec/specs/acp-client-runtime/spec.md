@@ -59,6 +59,11 @@
 - **THEN** 系统 SHALL 发布 `result` 或 `status` 类型的 `AgentEvent`
 - **AND** 事件内容 SHALL 保留可读文本
 
+#### Scenario: 文本 chunk 追加语义透传
+- **WHEN** 后端收到 `agent_message_chunk` 或 `agent_thought_chunk`
+- **THEN** 系统 SHALL 将输出事件标记为 `operation=append`
+- **AND** 事件 SHALL 保留该 chunk 的原始文本内容以支持前端增量合并
+
 #### Scenario: 工具事件归一化
 - **WHEN** agent 发送工具调用或工具结果 notification
 - **THEN** 系统 SHALL 发布 `tool` 类型的 `AgentEvent`
