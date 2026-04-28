@@ -179,10 +179,10 @@
             }
 
             # Add pre-commit hook
-            if [ ! -f .git/hooks/pre-commit ] || grep -qx 'cargo clippy --all-targets --all-features -- -D warnings' .git/hooks/pre-commit; then
+            if [ ! -f .git/hooks/pre-commit ] || grep -qx 'nix develop --command cargo clippy --all-targets --all-features -- -D warnings' .git/hooks/pre-commit; then
               mkdir -p .git/hooks
               echo '#!/bin/sh
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
+nix develop --command cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 pnpm run build || exit 1
 ' > .git/hooks/pre-commit
               chmod +x .git/hooks/pre-commit
