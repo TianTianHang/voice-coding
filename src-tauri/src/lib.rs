@@ -46,6 +46,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(vad_commands::VadRecorderState::new())
+        .manage(vad_commands::VadRuntimeConfigState::new())
         .manage(acp::AcpRuntime::default())
         .manage(AppLifecycleState::new())
         .setup(|app| {
@@ -86,6 +87,8 @@ pub fn run() {
             vad_commands::start_listening,
             vad_commands::stop_listening,
             vad_commands::get_vad_state,
+            vad_commands::get_vad_config,
+            vad_commands::set_vad_config,
             acp::session::connect_agent,
             acp::session::disconnect_agent,
             acp::session::get_agent_status,

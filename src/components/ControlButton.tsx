@@ -17,7 +17,7 @@ export function ControlButton({ state, onStart, onStop }: ControlButtonProps) {
 
   return (
     <button
-      className={`min-h-10 min-w-[150px] rounded-lg px-4 text-sm font-extrabold transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${buttonClass}`}
+      className={`min-h-10 min-w-[150px] cursor-pointer rounded-lg px-4 text-sm font-extrabold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60 ${buttonClass}`}
       onClick={isIdle ? onStart : onStop}
       disabled={isProcessing}
     >

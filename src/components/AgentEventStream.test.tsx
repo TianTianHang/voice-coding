@@ -111,4 +111,45 @@ describe("AgentEventStream", () => {
     expect(markup).toContain("Thinking");
     expect(markup).toContain("I am thinking");
   });
+
+  it("keeps the timeline collapsed until explicitly expanded", () => {
+    const markup = renderToStaticMarkup(
+      <AgentEventStream
+        events={[
+          event({
+            kind: "result",
+            title: "Answer",
+            content: "Detailed response",
+          }),
+        ]}
+        expanded={false}
+        onConfirm={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain("Show timeline");
+    expect(markup).toContain("Latest: Result");
+    expect(markup).not.toContain("Full agent history");
+  });
+
+  it("surfaces confirm events in the collapsed timeline summary", () => {
+    const markup = renderToStaticMarkup(
+      <AgentEventStream
+        events={[
+          event({
+            kind: "confirm",
+            content: "Apply these changes?",
+            confirmationId: "confirm-1",
+            confirmStatus: "pending",
+          }),
+        ]}
+        expanded={false}
+        onConfirm={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain("1 event stored");
+    expect(markup).toContain("Latest: Confirm");
+    expect(markup).toContain("Show timeline");
+  });
 });

@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 pub const HOP_SIZE: usize = 256;
 pub const SAMPLE_RATE: u32 = 16000;
 pub const THRESHOLD: f32 = 0.5;
@@ -6,7 +8,7 @@ pub const MAX_RECORDING_SECONDS: u32 = 30;
 pub const MAX_RECORDING_SAMPLES: usize = SAMPLE_RATE as usize * MAX_RECORDING_SECONDS as usize;
 pub const MIN_RECORDING_SAMPLES: usize = SAMPLE_RATE as usize / 2;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct VadConfig {
     pub hop_size: usize,

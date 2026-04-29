@@ -5,7 +5,7 @@ use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioRecorder;
-use crate::vad::{VadState, SAMPLE_RATE};
+use crate::vad::{VadConfig, VadState, SAMPLE_RATE, THRESHOLD};
 use stt_core::{AudioInput, SttEngine};
 
 pub struct VadRecorderState {
@@ -13,6 +13,39 @@ pub struct VadRecorderState {
     active_session: Arc<Mutex<Option<u64>>>,
     starting: Arc<Mutex<bool>>,
     next_session_id: AtomicU64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VadRuntimeConfig {
+    pub threshold: f32,
+}
+
+impl Default for VadRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            threshold: THRESHOLD,
+        }
+    }
+}
+
+pub struct VadRuntimeConfigState {
+    config: Arc<Mutex<VadRuntimeConfig>>,
+}
+
+impl VadRuntimeConfigState {
+    pub fn new() -> Self {
+        Self {
+            config: Arc::new(Mutex::new(VadRuntimeConfig::default())),
+        }
+    }
+
+    fn get(&self) -> VadRuntimeConfig {
+        self.config.lock().clone()
+    }
+
+    fn set(&self, config: VadRuntimeConfig) {
+        *self.config.lock() = config;
+    }
 }
 
 impl VadRecorderState {
@@ -143,6 +176,7 @@ async fn transcribe_audio_internal(
 pub async fn start_listening(
     app: AppHandle,
     state: tauri::State<'_, VadRecorderState>,
+    config_state: tauri::State<'_, VadRuntimeConfigState>,
 ) -> Result<(), String> {
     {
         let recorder = state.recorder.lock();
@@ -163,8 +197,14 @@ pub async fn start_listening(
     let session_id = state.allocate_session_id();
     state.set_active_session(session_id);
 
+    let runtime_config = config_state.get();
+    let vad_config = VadConfig {
+        threshold: runtime_config.threshold,
+        ..Default::default()
+    };
+
     let lib_path = get_vad_lib_path(&app)?;
-    let recorder = match AudioRecorder::new(&lib_path) {
+    let recorder = match AudioRecorder::new(&lib_path, &vad_config) {
         Ok(recorder) => recorder,
         Err(err) => {
             state.clear_active_session();
@@ -284,6 +324,29 @@ pub async fn start_listening(
 }
 
 #[tauri::command]
+pub fn get_vad_config(state: tauri::State<'_, VadRuntimeConfigState>) -> Result<VadRuntimeConfig, String> {
+    Ok(state.get())
+}
+
+#[tauri::command]
+pub fn set_vad_config(
+    state: tauri::State<'_, VadRuntimeConfigState>,
+    config: VadRuntimeConfig,
+) -> Result<(), String> {
+    validate_threshold(config.threshold)?;
+
+    state.set(config);
+    Ok(())
+}
+
+fn validate_threshold(threshold: f32) -> Result<(), String> {
+    if !(0.0..=1.0).contains(&threshold) {
+        return Err("threshold must be between 0.0 and 1.0".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub fn stop_listening(
     app: AppHandle,
     state: tauri::State<'_, VadRecorderState>,
@@ -354,5 +417,12 @@ mod tests {
             }
             other => panic!("Expected Samples input, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn set_vad_config_rejects_out_of_range_threshold() {
+        let result = validate_threshold(1.2);
+        assert!(result.is_err());
+        assert_eq!(result.err().as_deref(), Some("threshold must be between 0.0 and 1.0"));
     }
 }

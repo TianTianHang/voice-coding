@@ -8,6 +8,8 @@ import type {
 interface AgentEventStreamProps {
   events: AgentEvent[];
   onConfirm: (confirmationId: string, accepted: boolean) => Promise<void>;
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
 }
 
 const eventLabels: Record<AgentEventKind, string> = {
@@ -23,6 +25,8 @@ const eventLabels: Record<AgentEventKind, string> = {
 export function AgentEventStream({
   events,
   onConfirm,
+  expanded = true,
+  onToggleExpanded,
 }: AgentEventStreamProps) {
   const eventStyle: Record<
     AgentEventKind,
@@ -65,9 +69,70 @@ export function AgentEventStream({
     },
   };
 
+  const hasCriticalEvent = events.some(
+    (event) => event.kind === "confirm" || event.kind === "error",
+  );
+  const latestEvent = events.length > 0 ? events[events.length - 1] : undefined;
+
+  if (!expanded) {
+    return (
+      <section
+        className={`timeline-shell rounded-lg border bg-white p-3 ${
+          hasCriticalEvent
+            ? "border-amber-500/45"
+            : "border-slate-200"
+        }`}
+        aria-label="Agent output timeline"
+      >
+        <div className="flex items-center justify-between gap-3 max-sm:flex-col max-sm:items-stretch">
+          <div>
+            <div className="text-[11px] font-extrabold uppercase text-slate-500">
+              Timeline
+            </div>
+            <p className="mt-1 text-sm font-bold text-slate-900">
+              {events.length === 0
+                ? "No agent events yet"
+                : `${events.length} event${events.length === 1 ? "" : "s"} stored`}
+            </p>
+            {latestEvent && (
+              <p className="mt-1 max-h-10 overflow-hidden text-sm leading-5 text-slate-500">
+                Latest: {eventLabels[latestEvent.kind]}{" "}
+                {latestEvent.title ? `- ${latestEvent.title}` : latestEvent.content}
+              </p>
+            )}
+          </div>
+          <button
+            className="min-h-9 cursor-pointer rounded-lg border border-slate-300 px-3 text-sm font-extrabold text-slate-700 transition-colors duration-200 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+            onClick={onToggleExpanded}
+            type="button"
+          >
+            Show timeline
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   if (events.length === 0) {
     return (
-      <section className="flex min-h-[220px] flex-1 items-center justify-center overflow-y-auto rounded-lg border border-dashed border-slate-300">
+      <section
+        className="timeline-shell flex min-h-[140px] flex-col justify-center rounded-lg border border-dashed border-slate-300 p-3"
+        aria-label="Agent output timeline"
+      >
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <div className="text-[11px] font-extrabold uppercase text-slate-500">
+            Timeline
+          </div>
+          {onToggleExpanded && (
+            <button
+              className="min-h-8 cursor-pointer rounded-lg border border-slate-300 px-2.5 text-xs font-extrabold text-slate-700 transition-colors duration-200 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+              onClick={onToggleExpanded}
+              type="button"
+            >
+              Hide timeline
+            </button>
+          )}
+        </div>
         <div className="text-center text-slate-500">Agent output will appear here.</div>
       </section>
     );
@@ -75,9 +140,26 @@ export function AgentEventStream({
 
   return (
     <section
-      className="flex min-h-[220px] flex-1 flex-col gap-2.5 overflow-y-auto"
-      aria-label="Agent output stream"
+      className="timeline-shell flex max-h-[42vh] min-h-[220px] flex-col gap-2.5 overflow-y-auto rounded-lg border border-slate-200 bg-white p-3"
+      aria-label="Agent output timeline"
     >
+      <div className="sticky top-0 z-10 flex items-center justify-between gap-3 bg-white/95 pb-1">
+        <div>
+          <div className="text-[11px] font-extrabold uppercase text-slate-500">
+            Timeline
+          </div>
+          <p className="text-sm font-bold text-slate-900">Full agent history</p>
+        </div>
+        {onToggleExpanded && (
+          <button
+            className="min-h-8 cursor-pointer rounded-lg border border-slate-300 px-2.5 text-xs font-extrabold text-slate-700 transition-colors duration-200 hover:bg-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+            onClick={onToggleExpanded}
+            type="button"
+          >
+            Hide timeline
+          </button>
+        )}
+      </div>
       {events.map((event) => (
         <article
           className={`rounded-lg border border-slate-300 border-l-4 bg-white px-3 py-2.5 ${eventStyle[event.kind].card} ${
@@ -137,14 +219,14 @@ export function AgentEventStream({
           {event.kind === "confirm" && event.confirmationId && (
             <div className="mt-2.5 flex items-center gap-2">
               <button
-                className="min-h-9 rounded-lg bg-emerald-600 px-3 text-sm font-extrabold text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="min-h-9 cursor-pointer rounded-lg bg-emerald-600 px-3 text-sm font-extrabold text-white transition-colors duration-200 hover:bg-emerald-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-700 disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={event.confirmStatus !== "pending"}
                 onClick={() => onConfirm(event.confirmationId!, true)}
               >
                 Confirm
               </button>
               <button
-                className="min-h-9 rounded-lg bg-rose-600 px-3 text-sm font-extrabold text-white transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
+                className="min-h-9 cursor-pointer rounded-lg bg-rose-600 px-3 text-sm font-extrabold text-white transition-colors duration-200 hover:bg-rose-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-700 disabled:cursor-not-allowed disabled:opacity-60"
                 disabled={event.confirmStatus !== "pending"}
                 onClick={() => onConfirm(event.confirmationId!, false)}
               >
