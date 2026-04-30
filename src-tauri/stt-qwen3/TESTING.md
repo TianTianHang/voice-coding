@@ -128,12 +128,13 @@ cargo test --test engine_test test_engine_initialization_success
    ```
    models/
    ├── onnx_models/
-   │   ├── encoder_conv.onnx
-   │   ├── encoder_transformer.onnx
-   │   ├── decoder_init.int8.onnx
-   │   └── decoder_step.int8.onnx
-   ├── embed_tokens.bin
-   └── tokenizer.json
+   │   ├── encoder.int4.onnx
+   │   ├── decoder_init.int4.onnx
+   │   ├── decoder_step.int4.onnx
+   │   └── decoder_weights.int4.data
+    ├── embed_tokens.bin
+   ├── config.json
+     └── tokenizer.json
    ```
 
 2. **ONNX Runtime 动态库**

@@ -59,6 +59,29 @@ pub fn build_prompt_ids(
     Ok(ids)
 }
 
+pub fn get_audio_pad_range(prompt_ids: &[u32]) -> Result<(usize, usize), SttError> {
+    let Some(start) = prompt_ids.iter().position(|&id| id == AUDIO_PAD_ID) else {
+        return Err(SttError::InferenceError {
+            model: "prompt".into(),
+            detail: "Prompt does not contain any <|audio_pad|> tokens".into(),
+        });
+    };
+
+    let audio_pad_count = prompt_ids[start..]
+        .iter()
+        .take_while(|&&id| id == AUDIO_PAD_ID)
+        .count();
+
+    if audio_pad_count == 0 {
+        return Err(SttError::InferenceError {
+            model: "prompt".into(),
+            detail: "Prompt audio pad range is empty".into(),
+        });
+    }
+
+    Ok((start, start + audio_pad_count))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -144,6 +167,15 @@ mod tests {
         assert!(audio_start_pos.is_some());
         assert!(audio_end_pos.is_some());
         assert!(audio_start_pos.unwrap() < audio_end_pos.unwrap());
+    }
+
+    #[test]
+    fn test_get_audio_pad_range() {
+        let ids = build_prompt_ids_fake(5, None).unwrap();
+
+        let (start, end) = get_audio_pad_range(&ids).unwrap();
+        assert_eq!(end - start, 5);
+        assert!(ids[start..end].iter().all(|&id| id == AUDIO_PAD_ID));
     }
 
     proptest::proptest! {

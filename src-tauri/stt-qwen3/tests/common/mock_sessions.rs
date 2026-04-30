@@ -103,8 +103,8 @@ impl SessionManager for MockSessionManager {
 
     fn run_decoder_init(
         &mut self,
-        _input_embeds: &Array3<f32>,
-        _position_ids: &Array2<i64>,
+        _prompt_ids: &[u32],
+        _encoder_output: &[Vec<f32>],
     ) -> Result<(u32, KvCache), SttError> {
         if self.should_fail {
             return Err(SttError::InferenceError {

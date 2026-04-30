@@ -25,10 +25,9 @@ The system SHALL create and manage ONNX Runtime inference sessions for all Qwen3
 #### Scenario: Model file paths
 
 - **WHEN** loading model files
-- **THEN** encoder_conv.onnx SHALL be loaded from `{model_dir}/onnx_models/encoder_conv.onnx`
-- **AND** encoder_transformer.onnx SHALL be loaded from `{model_dir}/onnx_models/encoder_transformer.onnx`
-- **AND** decoder_init.int8.onnx SHALL be loaded from `{model_dir}/onnx_models/decoder_init.int8.onnx`
-- **AND** decoder_step.int8.onnx SHALL be loaded from `{model_dir}/onnx_models/decoder_step.int8.onnx`
+- **THEN** encoder.int4.onnx SHALL be loaded from `{model_dir}/onnx_models/encoder.int4.onnx`
+- **AND** decoder_init.int4.onnx SHALL be loaded from `{model_dir}/onnx_models/decoder_init.int4.onnx`
+- **AND** decoder_step.int4.onnx SHALL be loaded from `{model_dir}/onnx_models/decoder_step.int4.onnx`
 
 #### Scenario: Session creation failure
 
@@ -39,6 +38,8 @@ The system SHALL create and manage ONNX Runtime inference sessions for all Qwen3
 ### Requirement: Encoder Conv inference
 
 The system SHALL run the encoder convolutional model to downsample Mel spectrogram.
+
+> Note: this archived spec is stale relative to the new `andrewleech/qwen3-asr-0.6b-onnx` export. The implementation uses `encoder.int4.onnx` with `decoder_init.int4.onnx` / `decoder_step.int4.onnx` and shared `decoder_weights.int4.data`.
 
 #### Scenario: Input tensor format
 
@@ -243,7 +244,7 @@ The system SHALL support INT8-quantized decoder models for improved performance.
 #### Scenario: Fallback to FP32
 
 - **WHEN** INT8 model files do not exist
-- **THEN** system SHALL load FP32 models (decoder_init.onnx, decoder_step.onnx)
+- **THEN** system SHALL load INT4 models (decoder_init.int4.onnx, decoder_step.int4.onnx)
 - **AND** it SHALL emit warning about using FP32 (slower)
 
 #### Scenario: Performance characteristics

@@ -1,8 +1,8 @@
-use ndarray::Array3;
+use ndarray::{Array2, Array3};
 use ort::value::Value;
 
 use crate::models::session::EmbeddingMatrix;
-use crate::prompt::AUDIO_PAD_ID;
+use crate::prompt::{get_audio_pad_range, AUDIO_PAD_ID};
 use stt_core::SttError;
 
 pub fn embed_and_fuse(
@@ -51,24 +51,65 @@ pub struct KvCache {
 }
 
 pub fn decoder_init(
-    input_embeds: &Array3<f32>,
+    prompt_ids: &[u32],
+    encoder_output: &[Vec<f32>],
     sessions: &mut crate::models::session::OnnxSessions,
 ) -> Result<(u32, KvCache), SttError> {
-    let seq_len = input_embeds.shape()[1];
-    let position_ids_data: Vec<i64> = (0..seq_len).map(|i| i as i64).collect();
+    let seq_len = prompt_ids.len();
     let position_ids =
-        ndarray::Array2::from_shape_vec((1, seq_len), position_ids_data).map_err(|e| {
-            SttError::InferenceError {
+        Array2::from_shape_vec((1, seq_len), (0..seq_len).map(|i| i as i64).collect()).map_err(
+            |e| SttError::InferenceError {
                 model: "decoder_init".into(),
                 detail: format!("Failed to create position_ids: {}", e),
-            }
-        })?;
+            },
+        )?;
 
-    let input_embeds_value =
-        Value::from_array(input_embeds.clone()).map_err(|e| SttError::InferenceError {
+    let (audio_start, audio_end) = get_audio_pad_range(prompt_ids)?;
+    let audio_len = audio_end - audio_start;
+    if audio_len != encoder_output.len() {
+        return Err(SttError::InferenceError {
             model: "decoder_init".into(),
-            detail: format!("Failed to create input_embeds value: {}", e),
-        })?;
+            detail: format!(
+                "Encoder output count ({}) does not match audio pad token count ({})",
+                encoder_output.len(),
+                audio_len
+            ),
+        });
+    }
+
+    let hidden_size = encoder_output.first().map(|row| row.len()).unwrap_or(0);
+    let audio_features = Array3::from_shape_vec(
+        (1, audio_len, hidden_size),
+        encoder_output
+            .iter()
+            .flat_map(|row| row.iter().copied())
+            .collect(),
+    )
+    .map_err(|e| SttError::InferenceError {
+        model: "decoder_init".into(),
+        detail: format!("Failed to create audio_features tensor: {}", e),
+    })?;
+
+    let input_ids = Array2::from_shape_vec(
+        (1, seq_len),
+        prompt_ids.iter().map(|&id| id as i64).collect(),
+    )
+    .map_err(|e| SttError::InferenceError {
+        model: "decoder_init".into(),
+        detail: format!("Failed to create input_ids: {}", e),
+    })?;
+
+    let audio_offset = Array2::from_shape_vec((1, 1), vec![audio_start as i64]).map_err(|e| {
+        SttError::InferenceError {
+            model: "decoder_init".into(),
+            detail: format!("Failed to create audio_offset: {}", e),
+        }
+    })?;
+
+    let input_ids_value = Value::from_array(input_ids).map_err(|e| SttError::InferenceError {
+        model: "decoder_init".into(),
+        detail: format!("Failed to create input_ids value: {}", e),
+    })?;
 
     let position_ids_value =
         Value::from_array(position_ids.clone()).map_err(|e| SttError::InferenceError {
@@ -76,11 +117,25 @@ pub fn decoder_init(
             detail: format!("Failed to create position_ids value: {}", e),
         })?;
 
+    let audio_features_value =
+        Value::from_array(audio_features).map_err(|e| SttError::InferenceError {
+            model: "decoder_init".into(),
+            detail: format!("Failed to create audio_features value: {}", e),
+        })?;
+
+    let audio_offset_value =
+        Value::from_array(audio_offset).map_err(|e| SttError::InferenceError {
+            model: "decoder_init".into(),
+            detail: format!("Failed to create audio_offset value: {}", e),
+        })?;
+
     let outputs = sessions
         .decoder_init
         .run(ort::inputs![
-            "input_embeds" => input_embeds_value,
-            "position_ids" => position_ids_value
+            "input_ids" => input_ids_value,
+            "position_ids" => position_ids_value,
+            "audio_features" => audio_features_value,
+            "audio_offset" => audio_offset_value
         ])
         .map_err(|e| SttError::InferenceError {
             model: "decoder_init".into(),
@@ -280,14 +335,20 @@ pub(crate) fn greedy_decode_logits(
     if logits_shape.len() != 3 {
         return Err(SttError::InferenceError {
             model: model.into(),
-            detail: format!("Expected rank-3 logits tensor, got shape {:?}", logits_shape),
+            detail: format!(
+                "Expected rank-3 logits tensor, got shape {:?}",
+                logits_shape
+            ),
         });
     }
 
     if logits_shape.iter().any(|&dim| dim <= 0) {
         return Err(SttError::InferenceError {
             model: model.into(),
-            detail: format!("Expected positive logits dimensions, got {:?}", logits_shape),
+            detail: format!(
+                "Expected positive logits dimensions, got {:?}",
+                logits_shape
+            ),
         });
     }
 

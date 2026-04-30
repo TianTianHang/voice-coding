@@ -67,8 +67,8 @@ pub trait SessionManager: Send + Sync {
 
     fn run_decoder_init(
         &mut self,
-        input_embeds: &ndarray::Array3<f32>,
-        position_ids: &ndarray::Array2<i64>,
+        prompt_ids: &[u32],
+        encoder_output: &[Vec<f32>],
     ) -> Result<(u32, KvCache)>;
 
     fn run_decoder_step(

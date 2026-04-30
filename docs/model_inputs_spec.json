@@ -1,16 +1,15 @@
 {
-  "decoder_init.int8.onnx": {
-    "model_name": "decoder_init.int8.onnx",
+  "decoder_init.int4.onnx": {
+    "model_name": "decoder_init.int4.onnx",
     "graph_name": "main_graph",
     "inputs": [
       {
         "index": 0,
-        "name": "input_embeds",
-        "type": "FLOAT",
+        "name": "input_ids",
+        "type": "INT64",
         "shape": [
           "batch",
-          "seq_len",
-          1024
+          "seq_len"
         ]
       },
       {
@@ -20,6 +19,25 @@
         "shape": [
           "batch",
           "seq_len"
+        ]
+      },
+      {
+        "index": 2,
+        "name": "audio_features",
+        "type": "FLOAT",
+        "shape": [
+          1,
+          "audio_len",
+          1024
+        ]
+      },
+      {
+        "index": 3,
+        "name": "audio_offset",
+        "type": "INT64",
+        "shape": [
+          1,
+          1
         ]
       }
     ],
@@ -60,8 +78,8 @@
       }
     ]
   },
-  "decoder_step.int8.onnx": {
-    "model_name": "decoder_step.int8.onnx",
+  "decoder_step.int4.onnx": {
+    "model_name": "decoder_step.int4.onnx",
     "graph_name": "main_graph",
     "inputs": [
       {
@@ -145,70 +163,32 @@
       }
     ]
   },
-  "encoder_conv.onnx": {
-    "model_name": "encoder_conv.onnx",
+  "encoder.int4.onnx": {
+    "model_name": "encoder.int4.onnx",
     "graph_name": "main_graph",
     "inputs": [
       {
         "index": 0,
-        "name": "padded_mel_chunks",
+        "name": "mel",
         "type": "FLOAT",
         "shape": [
-          "num_chunks",
           1,
           128,
-          "chunk_len"
+          "frames"
         ]
       }
     ],
     "outputs": [
       {
         "index": 0,
-        "name": "chunk_features",
-        "type": "FLOAT",
-        "shape": [
-          "num_chunks",
-          "(((chunk_len - 1)//8)) + 1",
-          896
-        ]
-      }
-    ]
-  },
-  "encoder_transformer.onnx": {
-    "model_name": "encoder_transformer.onnx",
-    "graph_name": "main_graph",
-    "inputs": [
-      {
-        "index": 0,
-        "name": "hidden_states",
-        "type": "FLOAT",
-        "shape": [
-          "total_tokens",
-          896
-        ]
-      },
-      {
-        "index": 1,
-        "name": "attention_mask",
+        "name": "audio_features",
         "type": "FLOAT",
         "shape": [
           1,
-          1,
-          "total_tokens",
-          "total_tokens"
-        ]
-      }
-    ],
-    "outputs": [
-      {
-        "index": 0,
-        "name": "encoder_output",
-        "type": "FLOAT",
-        "shape": [
-          "total_tokens",
+          "tokens",
           1024
         ]
       }
     ]
-  }
+  },
 }

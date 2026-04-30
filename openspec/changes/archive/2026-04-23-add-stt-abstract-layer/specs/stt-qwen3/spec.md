@@ -36,9 +36,11 @@ The system SHALL load 4 ONNX model files from the specified model directory duri
 
 - **WHEN** initializing with model directory path
 - **THEN** it SHALL load `encoder_conv.onnx` from `onnx_models/` subdirectory
-- **AND** it SHALL load `encoder_transformer.onnx` from `onnx_models/` subdirectory
-- **AND** it SHALL load `decoder_init.int8.onnx` from `onnx_models/` subdirectory (INT8 quantized)
-- **AND** it SHALL load `decoder_step.int8.onnx` from `onnx_models/` subdirectory (INT8 quantized)
+- **AND** it SHALL load `encoder.int4.onnx` from `onnx_models/` subdirectory
+- **AND** it SHALL load `decoder_init.int4.onnx` from `onnx_models/` subdirectory
+- **AND** it SHALL load `decoder_step.int4.onnx` from `onnx_models/` subdirectory
+
+> Note: the load list above reflects the updated ONNX export. The old `encoder_conv` / `encoder_transformer` split is no longer used.
 
 #### Scenario: ONNX session configuration
 
@@ -176,7 +178,7 @@ The system SHALL run Qwen3-ASR encoder through Conv and Transformer ONNX models.
 - **WHEN** Mel spectrogram length exceeds chunk size (100 frames)
 - **THEN** it SHALL split into chunks of 100 frames
 - **AND** it SHALL pad chunks to equal length
-- **AND** it SHALL run `encoder_conv.onnx` on batched chunks
+- **AND** it SHALL run `encoder.int4.onnx` on audio frames
 - **AND** it SHALL remove padding from output
 
 #### Scenario: Conv output length calculation
@@ -187,7 +189,7 @@ The system SHALL run Qwen3-ASR encoder through Conv and Transformer ONNX models.
 
 #### Scenario: Transformer attention
 
-- **WHEN** running `encoder_transformer.onnx`
+- **WHEN** running `encoder.int4.onnx`
 - **THEN** it SHALL pass hidden states from Conv
 - **AND** it SHALL construct all-to-all attention mask (no windowing on CPU)
 - **AND** output shape SHALL be `[total_tokens, 1024]`

@@ -178,6 +178,8 @@ pub async fn start_listening(
     state: tauri::State<'_, VadRecorderState>,
     config_state: tauri::State<'_, VadRuntimeConfigState>,
 ) -> Result<(), String> {
+    let lib_path = get_vad_lib_path(&app)?;
+
     {
         let recorder = state.recorder.lock();
         let starting = state.starting.lock();
@@ -203,7 +205,6 @@ pub async fn start_listening(
         ..Default::default()
     };
 
-    let lib_path = get_vad_lib_path(&app)?;
     let recorder = match AudioRecorder::new(&lib_path, &vad_config) {
         Ok(recorder) => recorder,
         Err(err) => {

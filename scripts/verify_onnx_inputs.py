@@ -168,34 +168,21 @@ def generate_markdown_report(all_models_info: dict, output_path: Path):
         [
             "## Comparison with Rust Implementation\n",
             "\n",
-            "### encoder_conv.onnx\n",
-            "- **Rust usage**: `src-tauri/stt-qwen3/src/encoder.rs:81`\n",
-            "- **Input name**: `padded_mel_chunks`\n",
-            "- **Expected input**: 4D tensor `[batch, n_chunks, n_mels, chunk_len]`\n",
+            "### encoder.int4.onnx\n",
+            "- **Rust usage**: `src-tauri/stt-qwen3/src/encoder.rs:1`\n",
+            "- **Input name**: `mel`\n",
+            "- **Expected input**: 3D tensor `[1, 128, frames]`\n",
             "\n",
-            "### encoder_transformer.onnx\n",
-            "- **Rust usage**: `src-tauri/stt-qwen3/src/encoder.rs:150-156`\n",
-            "- **Input**: Output from encoder_conv\n",
-            "- **Outputs**: Encoder representations for decoder\n",
+            "### decoder_init.int4.onnx\n",
+            "- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:53`\n",
+            "- **Expected inputs**: input_ids, position_ids, audio_features, audio_offset\n",
+            "- **Outputs**: logits, present_keys, present_values\n",
             "\n",
-            "### decoder_init.int8.onnx\n",
-            "- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:84-90`\n",
-            "- **Input name**: `input_embeds`\n",
-            "- **Expected inputs**: \n",
-            "  - `input_embeds`: 3D tensor `[1, seq_len, hidden_size]`\n",
-            "- **Outputs**: \n",
-            "  - `logits`: Token prediction logits\n",
-            "  - `present_keys`: KV-cache keys\n",
-            "  - `present_values`: KV-cache values\n",
+            "### decoder_step.int4.onnx\n",
+            "- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:208-216`\n",
+            "- **Expected inputs**: input_embeds + cache inputs\n",
+            "- **Outputs**: logits + updated KV-cache\n",
             "\n",
-            "### decoder_step.int8.onnx\n",
-            "- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:216-224`\n",
-            "- **Expected inputs**:\n",
-            "  - `input_embeds`: Single token embedding\n",
-            "  - KV-cache from previous steps\n",
-            "- **Outputs**: \n",
-            "  - `logits`: Token prediction logits\n",
-            "  - Updated KV-cache\n",
         ]
     )
 
@@ -213,27 +200,27 @@ def compare_with_rust(all_models_info: dict):
     print("Comparison with Rust Implementation")
     print(f"{'=' * 80}\n")
 
-    # Check encoder_conv
-    if "encoder_conv.onnx" in all_models_info:
-        info = all_models_info["encoder_conv.onnx"]
+    # Check encoder
+    if "encoder.int4.onnx" in all_models_info:
+        info = all_models_info["encoder.int4.onnx"]
         input_names = [inp["name"] for inp in info["inputs"]]
-        print("✓ encoder_conv.onnx")
+        print("✓ encoder.int4.onnx")
         print(f"  Input names: {input_names}")
-        print(f"  Rust expects: 'padded_mel_chunks'")
-        if "padded_mel_chunks" in input_names:
+        print(f"  Rust expects: 'mel'")
+        if "mel" in input_names:
             print("  ✓ Matches!")
         else:
             print("  ✗ WARNING: Name mismatch!")
         print()
 
     # Check decoder_init
-    if "decoder_init.int8.onnx" in all_models_info:
-        info = all_models_info["decoder_init.int8.onnx"]
+    if "decoder_init.int4.onnx" in all_models_info:
+        info = all_models_info["decoder_init.int4.onnx"]
         input_names = [inp["name"] for inp in info["inputs"]]
-        print("✓ decoder_init.int8.onnx")
+        print("✓ decoder_init.int4.onnx")
         print(f"  Input names: {input_names}")
-        print(f"  Rust expects: 'input_embeds'")
-        if "input_embeds" in input_names:
+        print(f"  Rust expects: input_ids + audio_features")
+        if "input_ids" in input_names and "audio_features" in input_names:
             print("  ✓ Matches!")
         else:
             print("  ✗ WARNING: Name mismatch!")
@@ -244,20 +231,12 @@ def compare_with_rust(all_models_info: dict):
         print()
 
     # Check decoder_step
-    if "decoder_step.int8.onnx" in all_models_info:
-        info = all_models_info["decoder_step.int8.onnx"]
+    if "decoder_step.int4.onnx" in all_models_info:
+        info = all_models_info["decoder_step.int4.onnx"]
         input_names = [inp["name"] for inp in info["inputs"]]
-        print("✓ decoder_step.int8.onnx")
+        print("✓ decoder_step.int4.onnx")
         print(f"  Input names: {input_names}")
         print(f"  Rust expects: input_embeds + cache inputs")
-        print()
-
-    # Check encoder_transformer
-    if "encoder_transformer.onnx" in all_models_info:
-        info = all_models_info["encoder_transformer.onnx"]
-        input_names = [inp["name"] for inp in info["inputs"]]
-        print("✓ encoder_transformer.onnx")
-        print(f"  Input names: {input_names}")
         print()
 
 

@@ -18,7 +18,7 @@ use stt_core::{AudioInput, SttConfig, SttEngine, SttError, SttResult, TimingInfo
 use audio::loader;
 use audio::mel::{compute_mel_spectrogram, create_mel_filterbank};
 use audio::vad::{find_split_points, split_audio_at_points};
-use decoder::{decoder_init, embed_and_fuse, run_autoregressive_decode};
+use decoder::{decoder_init, run_autoregressive_decode};
 use encoder::run_encoder;
 use models::session::{EmbeddingMatrix, OnnxSessions};
 use output::parse_qwen3_output;
@@ -116,20 +116,15 @@ impl Qwen3AsrEngine {
             run_encoder(&mel, &mut sessions)?
         };
 
-        let n_audio_tokens = encoder_output.len();
-
-        let prompt_ids =
-            build_prompt_ids(n_audio_tokens, config.language.as_deref(), &self.tokenizer)?;
-
-        let input_embeds = embed_and_fuse(&prompt_ids, &encoder_output, &self.embeddings)?;
+        let prompt_ids = build_prompt_ids(encoder_output.len(), config.language.as_deref(), &self.tokenizer)?;
 
         let (init_token, cache) = {
             let mut sessions = self.sessions.lock().unwrap();
-            decoder_init(&input_embeds, &mut sessions)?
+            decoder_init(&prompt_ids, &encoder_output, &mut sessions)?
         };
 
         let max_tokens = config.max_new_tokens.unwrap_or(512);
-        let seq_len = input_embeds.shape()[1];
+        let seq_len = prompt_ids.len();
         let generated_tokens = {
             let mut sessions = self.sessions.lock().unwrap();
             run_autoregressive_decode(
@@ -267,18 +262,41 @@ impl SttEngine for Qwen3AsrEngine {
         let model_dir = Path::new(&self.model_dir);
         let onnx_dir = model_dir.join("onnx_models");
 
-        let required_files = [
-            onnx_dir.join("encoder_conv.onnx"),
-            onnx_dir.join("encoder_transformer.onnx"),
-            model_dir.join("embed_tokens.bin"),
-            model_dir.join("tokenizer.json"),
-        ];
+        let has_any = |base_dir: &Path, candidates: &[&str]| {
+            candidates.iter().any(|candidate| base_dir.join(candidate).exists())
+        };
 
-        for file in &required_files {
-            if !file.exists() {
+        if !has_any(&onnx_dir, &["encoder.int4.onnx", "encoder.onnx"]) {
+            return Err(SttError::InferenceError {
+                model: "encoder".into(),
+                detail: format!("Missing file: one of {:?} in {}", ["encoder.int4.onnx", "encoder.onnx"], onnx_dir.display()),
+            });
+        }
+
+        if !has_any(&onnx_dir, &["decoder_init.int4.onnx", "decoder_init.onnx"]) {
+            return Err(SttError::InferenceError {
+                model: "decoder_init".into(),
+                detail: format!("Missing file: one of {:?} in {}", ["decoder_init.int4.onnx", "decoder_init.onnx"], onnx_dir.display()),
+            });
+        }
+
+        if !has_any(&onnx_dir, &["decoder_step.int4.onnx", "decoder_step.onnx"]) {
+            return Err(SttError::InferenceError {
+                model: "decoder_step".into(),
+                detail: format!("Missing file: one of {:?} in {}", ["decoder_step.int4.onnx", "decoder_step.onnx"], onnx_dir.display()),
+            });
+        }
+
+        for (file, model_name) in [
+            ("embed_tokens.bin", "embed_tokens"),
+            ("tokenizer.json", "tokenizer.json"),
+            ("config.json", "config.json"),
+        ] {
+            let path = model_dir.join(file);
+            if !path.exists() {
                 return Err(SttError::InferenceError {
-                    model: "health_check".into(),
-                    detail: format!("Missing file: {}", file.display()),
+                    model: model_name.into(),
+                    detail: format!("Missing file: {}", path.display()),
                 });
             }
         }

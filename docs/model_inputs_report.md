@@ -2,7 +2,7 @@
 This document describes the input and output specifications for all ONNX models
 used in the voice-coding project.
 
-## decoder_init.int8.onnx
+## decoder_init.int4.onnx
 
 **Graph Name**: `main_graph`
 
@@ -10,7 +10,10 @@ used in the voice-coding project.
 
 | Index | Name | Type | Shape |
 |-------|------|------|-------|
-| 0 | `input_embeds` | FLOAT | [batch, seq_len, 1024] |
+| 0 | `input_ids` | INT64 | [batch, seq_len] |
+| 1 | `position_ids` | INT64 | [batch, seq_len] |
+| 2 | `audio_features` | FLOAT | [1, audio_len, 1024] |
+| 3 | `audio_offset` | INT64 | [1, 1] |
 | 1 | `position_ids` | INT64 | [batch, seq_len] |
 
 ### Outputs
@@ -23,7 +26,7 @@ used in the voice-coding project.
 
 ---
 
-## decoder_step.int8.onnx
+## decoder_step.int4.onnx
 
 **Graph Name**: `main_graph`
 
@@ -46,7 +49,7 @@ used in the voice-coding project.
 
 ---
 
-## encoder_conv.onnx
+## encoder.int4.onnx
 
 **Graph Name**: `main_graph`
 
@@ -54,62 +57,40 @@ used in the voice-coding project.
 
 | Index | Name | Type | Shape |
 |-------|------|------|-------|
-| 0 | `padded_mel_chunks` | FLOAT | [num_chunks, 1, 128, chunk_len] |
+| 0 | `mel` | FLOAT | [1, 128, frames] |
 
 ### Outputs
 
 | Index | Name | Type | Shape |
 |-------|------|------|-------|
-| 0 | `chunk_features` | FLOAT | [num_chunks, (((chunk_len - 1)//8)) + 1, 896] |
-
----
-
-## encoder_transformer.onnx
-
-**Graph Name**: `main_graph`
-
-### Inputs
-
-| Index | Name | Type | Shape |
-|-------|------|------|-------|
-| 0 | `hidden_states` | FLOAT | [total_tokens, 896] |
-| 1 | `attention_mask` | FLOAT | [1, 1, total_tokens, total_tokens] |
-
-### Outputs
-
-| Index | Name | Type | Shape |
-|-------|------|------|-------|
-| 0 | `encoder_output` | FLOAT | [total_tokens, 1024] |
+| 0 | `audio_features` | FLOAT | [1, tokens, 1024] |
 
 ---
 
 ## Comparison with Rust Implementation
 
-### encoder_conv.onnx
-- **Rust usage**: `src-tauri/stt-qwen3/src/encoder.rs:81`
-- **Input name**: `padded_mel_chunks`
-- **Expected input**: 4D tensor `[batch, n_chunks, n_mels, chunk_len]`
+### encoder.int4.onnx
+- **Rust usage**: `src-tauri/stt-qwen3/src/encoder.rs:1`
+- **Input name**: `mel`
+- **Expected input**: 3D tensor `[1, 128, frames]`
 
-### encoder_transformer.onnx
-- **Rust usage**: `src-tauri/stt-qwen3/src/encoder.rs:150-156`
-- **Input**: Output from encoder_conv
-- **Outputs**: Encoder representations for decoder
-
-### decoder_init.int8.onnx
-- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:84-90`
-- **Input name**: `input_embeds`
-- **Expected inputs**: 
-  - `input_embeds`: 3D tensor `[1, seq_len, hidden_size]`
-- **Outputs**: 
+### decoder_init.int4.onnx
+- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:53`
+- **Expected inputs**:
+  - `input_ids`: prompt token IDs
+  - `position_ids`: absolute positions
+  - `audio_features`: encoder output inserted for audio placeholders
+  - `audio_offset`: audio placeholder start index
+- **Outputs**:
   - `logits`: Token prediction logits
   - `present_keys`: KV-cache keys
   - `present_values`: KV-cache values
 
-### decoder_step.int8.onnx
-- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:216-224`
+### decoder_step.int4.onnx
+- **Rust usage**: `src-tauri/stt-qwen3/src/decoder.rs:208-216`
 - **Expected inputs**:
   - `input_embeds`: Single token embedding
   - KV-cache from previous steps
-- **Outputs**: 
+- **Outputs**:
   - `logits`: Token prediction logits
   - Updated KV-cache
