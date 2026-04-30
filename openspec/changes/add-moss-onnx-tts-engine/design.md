@@ -57,6 +57,183 @@ MOSS 方案由 TTS 模型与 Audio Tokenizer/Codec 模型共同组成，且 mani
 
 **备选方案：** 强制使用 MOSS。会导致 CI/开发环境在缺模型时普遍失败。
 
+## ONNX Inference Pipeline
+
+基于对 MOSS-TTS-Nano-100M-ONNX 官方 Python 推理代码（`infer_onnx.py`, `onnx_tts_runtime.py`, `ort_cpu_runtime.py`）的分析，MOSS ONNX 引擎采用 **Global + Local 混合 Transformer 架构**，推理链路分为 5 个阶段：
+
+### Stage 0: 文本准备与预处理
+
+```
+输入文本
+  ↓
+1. 文本归一化 (WeTextProcessing / normalize_tts_text)
+   → 处理多语言标点、大小写、空格
+2. SentencePiece 分词
+   → text_token_ids: List[int]
+3. 长文本分块 (可选，max_tokens=75)
+   → 按句子/分句切分，避免单次生成超长
+```
+
+### Stage 1: 参考音频编码 (Audio Tokenizer)
+
+```
+参考音频 (若提供，用于音色克隆)
+  ↓
+重采样 → 48kHz 立体声
+  ↓
+codec_encode.onnx (MOSS-Audio-Tokenizer-Nano)
+  输入: waveform [1, channels, samples]
+  输出: audio_codes [1, frames, n_quantizers=16]
+  ↓
+prompt_audio_codes: List[List[int]]  (RVQ 16 层 codebook)
+```
+
+**关键点**: Codec 与 TTS 是独立模型，通过 `codec_browser_onnx_meta.json` 引用。
+
+### Stage 2: TTS 输入构建 (Prompt Construction)
+
+```
+构造特殊 token 序列:
+[
+  user_prompt_prefix_tokens,    # 来自 manifest
+  audio_start_token_id,
+  ... audio_prefix_rows ...     # 参考音频的 codes (若有)
+  audio_end_token_id,
+  user_prompt_after_reference_tokens,
+  text_token_ids,               # 待合成文本的 token ids
+  assistant_prompt_prefix_tokens,
+  audio_start_token_id
+]
+  ↓
+input_ids [batch=1, seq_len, n_vq+1]  # n_vq=8 (使用前 8 层 RVQ)
+attention_mask [batch=1, seq_len]
+```
+
+**为什么是 n_vq+1?** 第 0 列存文本 token/slot token，第 1-8 列存 8 层 audio codebook tokens。
+
+### Stage 3: TTS Prefill (Global Transformer)
+
+```
+moss_tts_prefill.onnx
+  输入:
+    - input_ids [1, seq, n_vq+1]
+    - attention_mask [1, seq]
+  输出:
+    - global_hidden [1, seq, hidden_size]
+    - present_key_values_* (各层的 KV cache)
+  ↓
+提取: global_hidden = global_hidden[:, -1, :]  # 最后一个隐藏状态
+```
+
+**作用**: 一次性处理完整 prompt，构建全局上下文表示和 KV cache，为后续自回归生成打基础。
+
+### Stage 4: 自回归 Frame 生成循环 (核心)
+
+```
+FOR step_index in range(max_new_frames=375):
+  │
+  ├─ 4a: Local Transformer (帧预测)
+  │    三种采样模式:
+  │
+  │    A) Greedy (do_sample=False)
+  │        moss_tts_local_greedy_frame.onnx
+  │        → 一次性生成 n_vq=8 个 token (确定性)
+  │
+  │    B) Fixed Sampling (默认, sample_mode="fixed")
+  │        moss_tts_local_fixed_sampled_frame.onnx
+  │        → 融合采样操作在 ONNX 图内，最快
+  │
+  │    C) Full Sampling (sample_mode="full")
+  │        moss_tts_local_decoder.onnx / local_cached_step.onnx
+  │        → 逐 channel 自回归采样，最灵活
+  │
+  │    输出:
+  │      - should_continue: bool  (是否继续生成)
+  │      - frame_token_ids [n_vq]  (8 个 codebook 各一个 token)
+  │    ↓
+  │  frame = [token_0, token_1, ..., token_7]
+  │  generated_frames.append(frame)
+  │
+  ├─ 4b: Global Transformer Decode Step (更新 KV cache)
+  │    moss_tts_decode_step.onnx
+  │      输入:
+  │        - input_ids [1, 1, n_vq+1]  # 当前生成的 frame
+  │        - past_valid_lengths
+  │        - past_key_values_* (上一步的 KV cache)
+  │      输出:
+  │        - global_hidden (更新后的最后隐藏状态)
+  │        - present_key_values_* (更新的 KV cache)
+  │    ↓
+  │  更新 global_hidden, past_key_values
+  │
+  └─ IF should_continue=False: BREAK
+
+输出: generated_frames: List[List[int]]
+     [[t0_0, ..., t0_7],  # frame 0
+      [t1_0, ..., t1_7],  # frame 1
+      ...]
+```
+
+**Global + Local 设计优势**:
+- Global 处理长距离依赖，但只在 prefill 和每步 decode 调用一次
+- Local 是轻量级 4 层 decoder，专门负责帧预测，计算效率高
+- 分离后支持流式：Local 可独立生成多帧后再更新 Global
+
+### Stage 5: 音频解码 (Codec Decode)
+
+```
+generated_frames [num_frames, n_vq=8]
+  ↓
+A) Full Decode (首版实现)
+   codec_decode_full.onnx
+     输入: audio_codes [1, num_frames, n_quantizers=16]
+     输出: audio [1, channels=2, samples]  # 48kHz 立体声
+
+B) Streaming Decode (未来优化)
+   codec_decode_step.onnx (带状态缓存)
+     → 分批解码 (1-8 帧/批)，降低延迟
+     → 维护 decoder state 跨调用
+
+输出: waveform [channels, samples]  # float32 PCM
+```
+
+### ONNX 模型清单
+
+**TTS 模型** (5 个):
+1. `moss_tts_prefill.onnx` - Global transformer prefill
+2. `moss_tts_decode_step.onnx` - Global transformer 自回归步
+3. `moss_tts_local_decoder.onnx` - Local transformer (baseline)
+4. `moss_tts_local_cached_step.onnx` - 带 KV cache 的优化 local step
+5. `moss_tts_local_fixed_sampled_frame.onnx` - 融合采样的 fastest path
+
+**Codec 模型** (2 个):
+6. `codec_encode.onnx` - 音频编码 (参考音频 → codes)
+7. `codec_decode_full.onnx` / `codec_decode_step.onnx` - 音频解码
+
+### 数据流总结
+
+```
+text + (可选 ref_audio)
+  → normalized_text
+  → text_token_ids
+  → input_ids (with special tokens)
+  → prefill → global_hidden + KV cache
+  → FOR each frame:
+      local transform → frame [8 tokens]
+      global decode step → update hidden + KV cache
+  → generated_frames [N, 8]
+  → codec decode → waveform [2, samples]
+  → 48kHz stereo PCM
+```
+
+### 首版实现范围
+
+- ✅ Stage 0-5 完整链路
+- ✅ Greedy / Fixed 采样模式
+- ✅ `decode_full` 批量解码
+- ❌ 流式 `decode_step` (后续优化)
+- ❌ 参考音频克隆 (后续扩展)
+
 ## Risks / Trade-offs
 
 - [模型文件大、加载慢] -> 在 `prepare_tts` 做一次性健康检查并缓存 session，避免每次合成重复初始化。

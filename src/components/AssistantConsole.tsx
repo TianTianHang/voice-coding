@@ -15,6 +15,12 @@ type VadRuntimeConfig = {
   threshold: number;
 };
 
+type TtsStatusSnapshot = {
+  state: "idle" | "synthesizing" | "ready" | "playing" | "failed";
+  error?: string;
+  hasBufferedAudio: boolean;
+};
+
 export type VoiceExperienceState =
   | "Dormant"
   | "WakeDetected"
@@ -134,6 +140,11 @@ export function AssistantConsole() {
   const [vadThresholdInput, setVadThresholdInput] = useState("0.5");
   const [vadConfigMessage, setVadConfigMessage] = useState<string | null>(null);
   const [isSavingVadConfig, setIsSavingVadConfig] = useState(false);
+  const [ttsText, setTtsText] = useState("你好。");
+  const [ttsStatus, setTtsStatus] = useState<TtsStatusSnapshot | null>(null);
+  const [ttsMessage, setTtsMessage] = useState<string | null>(null);
+  const [isSynthesizingTts, setIsSynthesizingTts] = useState(false);
+  const [isPlayingTts, setIsPlayingTts] = useState(false);
   const {
     state,
     transcript,
@@ -150,7 +161,7 @@ export function AssistantConsole() {
   useEffect(() => {
     let active = true;
 
-    async function loadVadConfig() {
+    async function loadRuntimeConfig() {
       try {
         const config = await invoke<VadRuntimeConfig>("get_vad_config");
         if (!active) {
@@ -163,9 +174,22 @@ export function AssistantConsole() {
         }
         setVadConfigMessage("Failed to load VAD threshold.");
       }
+
+      try {
+        const status = await invoke<TtsStatusSnapshot>("get_tts_status");
+        if (!active) {
+          return;
+        }
+        setTtsStatus(status);
+      } catch {
+        if (!active) {
+          return;
+        }
+        setTtsMessage("Failed to load TTS status.");
+      }
     }
 
-    void loadVadConfig();
+    void loadRuntimeConfig();
 
     return () => {
       active = false;
@@ -255,6 +279,53 @@ export function AssistantConsole() {
       setVadConfigMessage(String(error));
     } finally {
       setIsSavingVadConfig(false);
+    }
+  }
+
+  async function synthesizeTts() {
+    const text = ttsText.trim();
+    if (!text) {
+      setTtsMessage("TTS text must not be empty.");
+      return;
+    }
+
+    setIsSynthesizingTts(true);
+    setTtsMessage(null);
+    try {
+      const status = await invoke<TtsStatusSnapshot>("synthesize_tts", { text });
+      setTtsStatus(status);
+      setTtsMessage(status.hasBufferedAudio ? "Audio generated and ready to play." : "Synthesis finished without buffered audio.");
+    } catch (error) {
+      setTtsMessage(String(error));
+      setTtsStatus((current) => current ? { ...current, state: "failed", error: String(error) } : null);
+    } finally {
+      setIsSynthesizingTts(false);
+    }
+  }
+
+  async function playTts() {
+    setIsPlayingTts(true);
+    setTtsMessage(null);
+    try {
+      const status = await invoke<TtsStatusSnapshot>("play_tts");
+      setTtsStatus(status);
+      setTtsMessage("Playback finished.");
+    } catch (error) {
+      setTtsMessage(String(error));
+      setTtsStatus((current) => current ? { ...current, state: "failed", error: String(error) } : null);
+    } finally {
+      setIsPlayingTts(false);
+    }
+  }
+
+  async function cancelTtsPlayback() {
+    setTtsMessage(null);
+    try {
+      const status = await invoke<TtsStatusSnapshot>("cancel_tts_playback");
+      setTtsStatus(status);
+      setTtsMessage("Playback cancelled.");
+    } catch (error) {
+      setTtsMessage(String(error));
     }
   }
 
@@ -401,6 +472,53 @@ export function AssistantConsole() {
                 <p className="text-xs text-slate-600">Lower is more sensitive; higher is stricter.</p>
                 {vadConfigMessage && (
                   <p className="text-xs font-semibold text-slate-700">{vadConfigMessage}</p>
+                )}
+              </div>
+            </section>
+
+            <section className="mt-4 border-t border-slate-200 pt-4" aria-label="Developer TTS controls">
+              <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
+                Dev · TTS Test
+              </div>
+              <div className="grid gap-2">
+                <textarea
+                  className="min-h-20 resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                  value={ttsText}
+                  onChange={(event) => setTtsText(event.target.value)}
+                  placeholder="Text to synthesize"
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={synthesizeTts}
+                    disabled={isSynthesizingTts || isPlayingTts}
+                    type="button"
+                  >
+                    {isSynthesizingTts ? "Generating..." : "Generate"}
+                  </button>
+                  <button
+                    className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={playTts}
+                    disabled={isSynthesizingTts || isPlayingTts || !ttsStatus?.hasBufferedAudio}
+                    type="button"
+                  >
+                    {isPlayingTts ? "Playing..." : "Play"}
+                  </button>
+                </div>
+                {isPlayingTts && (
+                  <button
+                    className="min-h-10 cursor-pointer rounded-lg border border-rose-300 bg-rose-50 px-3 text-sm font-extrabold text-rose-800 transition-colors duration-200 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-900"
+                    onClick={cancelTtsPlayback}
+                    type="button"
+                  >
+                    Stop Playback
+                  </button>
+                )}
+                <p className="text-xs text-slate-600">
+                  Status: {ttsStatus ? `${ttsStatus.state}${ttsStatus.hasBufferedAudio ? " · buffered" : ""}` : "unknown"}
+                </p>
+                {(ttsMessage || ttsStatus?.error) && (
+                  <p className="text-xs font-semibold text-slate-700">{ttsMessage || ttsStatus?.error}</p>
                 )}
               </div>
             </section>

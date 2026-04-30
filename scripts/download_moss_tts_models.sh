@@ -45,12 +45,13 @@ download_repo "${TTS_REPO}" "${TTS_DIR}" \
   "browser_poc_manifest.json" \
   "tts_browser_onnx_meta.json" \
   "tokenizer.model" \
-  "prefill.onnx" \
-  "prefill.data" \
-  "decode.onnx" \
-  "decode.data" \
-  "local_transformer.onnx" \
-  "local_transformer.data"
+  "moss_tts_prefill.onnx" \
+  "moss_tts_decode_step.onnx" \
+  "moss_tts_global_shared.data" \
+  "moss_tts_local_decoder.onnx" \
+  "moss_tts_local_cached_step.onnx" \
+  "moss_tts_local_fixed_sampled_frame.onnx" \
+  "moss_tts_local_shared.data"
 
 download_repo "${CODEC_REPO}" "${CODEC_DIR}" \
   "codec_browser_onnx_meta.json" \
@@ -65,9 +66,13 @@ REQUIRED_FILES=(
   "${TTS_DIR}/browser_poc_manifest.json"
   "${TTS_DIR}/tts_browser_onnx_meta.json"
   "${TTS_DIR}/tokenizer.model"
-  "${TTS_DIR}/prefill.onnx"
-  "${TTS_DIR}/decode.onnx"
-  "${TTS_DIR}/local_transformer.onnx"
+  "${TTS_DIR}/moss_tts_prefill.onnx"
+  "${TTS_DIR}/moss_tts_decode_step.onnx"
+  "${TTS_DIR}/moss_tts_global_shared.data"
+  "${TTS_DIR}/moss_tts_local_decoder.onnx"
+  "${TTS_DIR}/moss_tts_local_cached_step.onnx"
+  "${TTS_DIR}/moss_tts_local_fixed_sampled_frame.onnx"
+  "${TTS_DIR}/moss_tts_local_shared.data"
   "${CODEC_DIR}/codec_browser_onnx_meta.json"
   "${CODEC_DIR}/moss_audio_tokenizer_encode.onnx"
   "${CODEC_DIR}/moss_audio_tokenizer_decode_full.onnx"

@@ -3,12 +3,13 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 use tokio::time::{sleep, Duration};
-use tts_core::{
-    AudioBuffer, PcmData, TtsConfig, TtsEngine, TtsError, TtsResult, PLAYBACK_CHANNELS,
-    PLAYBACK_SAMPLE_RATE_HZ,
-};
+#[cfg(any(test, feature = "tts-mock"))]
+use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
+use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult};
 
 use crate::audio::{playback_buffer_from_tts, AudioOutput};
+#[cfg(feature = "tts-moss-onnx")]
+use tts_moss::MossOnnxTtsEngine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -44,7 +45,30 @@ pub struct TtsRuntime {
 
 impl Default for TtsRuntime {
     fn default() -> Self {
-        Self::new(Arc::new(MockTtsEngine))
+        Self::new(default_tts_engine())
+    }
+}
+
+fn default_tts_engine() -> Arc<dyn TtsEngine> {
+    #[cfg(feature = "tts-moss-onnx")]
+    {
+        match MossOnnxTtsEngine::from_env() {
+            Ok(engine) => Arc::new(engine),
+            Err(err) => Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string())),
+        }
+    }
+
+    #[cfg(all(not(feature = "tts-moss-onnx"), feature = "tts-mock"))]
+    {
+        Arc::new(MockTtsEngine)
+    }
+
+    #[cfg(all(not(feature = "tts-moss-onnx"), not(feature = "tts-mock")))]
+    {
+        Arc::new(StartupErrorTtsEngine::new(
+            "unavailable-tts",
+            "TTS engine not available: no engine feature enabled".to_string(),
+        ))
     }
 }
 
@@ -124,8 +148,48 @@ impl TtsRuntime {
     }
 }
 
+#[cfg(any(test, feature = "tts-mock"))]
 struct MockTtsEngine;
 
+#[cfg(any(
+    feature = "tts-moss-onnx",
+    all(not(feature = "tts-moss-onnx"), not(feature = "tts-mock"))
+))]
+struct StartupErrorTtsEngine {
+    name: &'static str,
+    error: String,
+}
+
+#[cfg(any(
+    feature = "tts-moss-onnx",
+    all(not(feature = "tts-moss-onnx"), not(feature = "tts-mock"))
+))]
+impl StartupErrorTtsEngine {
+    fn new(name: &'static str, error: String) -> Self {
+        Self { name, error }
+    }
+}
+
+#[cfg(any(
+    feature = "tts-moss-onnx",
+    all(not(feature = "tts-moss-onnx"), not(feature = "tts-mock"))
+))]
+#[async_trait::async_trait]
+impl TtsEngine for StartupErrorTtsEngine {
+    fn engine_name(&self) -> &str {
+        self.name
+    }
+
+    async fn synthesize(&self, _text: &str, _config: TtsConfig) -> tts_core::Result<TtsResult> {
+        Err(TtsError::UnsupportedConfig(self.error.clone()))
+    }
+
+    async fn health_check(&self) -> tts_core::Result<bool> {
+        Err(TtsError::UnsupportedConfig(self.error.clone()))
+    }
+}
+
+#[cfg(any(test, feature = "tts-mock"))]
 #[async_trait::async_trait]
 impl TtsEngine for MockTtsEngine {
     fn engine_name(&self) -> &str {
@@ -307,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_transitions_to_ready_after_synthesis() {
-        let runtime = TtsRuntime::default();
+        let runtime = TtsRuntime::new(Arc::new(MockTtsEngine));
 
         let _ = runtime
             .synthesize(None, "hello".to_string(), TtsConfig::default())
