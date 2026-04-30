@@ -51,7 +51,7 @@ async fn test_minimum_duration_boundary() {
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -83,7 +83,7 @@ async fn test_silence_only_audio() {
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -94,7 +94,7 @@ async fn test_extreme_low_sample_rate() {
     let input = AudioInput::Samples(samples, 8000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -105,7 +105,7 @@ async fn test_extreme_high_sample_rate() {
     let input = AudioInput::Samples(samples, 96000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -116,7 +116,7 @@ async fn test_clipping_audio() {
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -127,7 +127,7 @@ async fn test_negative_amplitude_audio() {
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -142,7 +142,7 @@ async fn test_very_large_max_tokens() {
     };
 
     let result = engine.transcribe(input, config).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
     let result = result.unwrap();
     assert!(result.timing.tokens_generated.unwrap() < 10000);
 }
@@ -168,7 +168,7 @@ async fn test_long_audio_handling() {
     };
 
     let result = engine.transcribe(input, config).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
     let result = result.unwrap();
     assert!(result.timing.processing_time_sec > 0.0);
 }
@@ -186,7 +186,7 @@ async fn test_vad_with_very_small_chunk() {
     };
 
     let result = engine.transcribe(input, config).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -202,7 +202,7 @@ async fn test_vad_with_very_large_chunk() {
     };
 
     let result = engine.transcribe(input, config).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -217,7 +217,7 @@ async fn test_zero_max_tokens() {
     };
 
     let result = engine.transcribe(input, config).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }
 
 #[tokio::test]
@@ -239,5 +239,5 @@ async fn test_very_short_duration() {
     let input = AudioInput::Samples(samples, 16000);
 
     let result = engine.transcribe(input, SttConfig::default()).await;
-    assert!(result.is_ok());
+    assert!(result.is_ok(), "transcription failed: {:?}", result.err());
 }

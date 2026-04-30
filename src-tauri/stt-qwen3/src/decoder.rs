@@ -1,4 +1,4 @@
-use ndarray::{Array2, Array3};
+use ndarray::{Array1, Array2, Array3};
 use ort::value::Value;
 
 use crate::models::session::EmbeddingMatrix;
@@ -99,7 +99,7 @@ pub fn decoder_init(
         detail: format!("Failed to create input_ids: {}", e),
     })?;
 
-    let audio_offset = Array2::from_shape_vec((1, 1), vec![audio_start as i64]).map_err(|e| {
+    let audio_offset = Array1::from_shape_vec(1, vec![audio_start as i64]).map_err(|e| {
         SttError::InferenceError {
             model: "decoder_init".into(),
             detail: format!("Failed to create audio_offset: {}", e),
