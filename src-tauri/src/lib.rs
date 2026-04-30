@@ -3,6 +3,7 @@ mod asr;
 mod audio;
 mod vad;
 mod vad_commands;
+mod tts;
 
 use parking_lot::Mutex;
 use tauri::menu::{Menu, MenuItem};
@@ -47,6 +48,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(vad_commands::VadRecorderState::new())
         .manage(vad_commands::VadRuntimeConfigState::new())
+        .manage(tts::TtsRuntime::default())
         .manage(acp::AcpRuntime::default())
         .manage(AppLifecycleState::new())
         .setup(|app| {
@@ -84,6 +86,11 @@ pub fn run() {
             asr::get_asr_status,
             asr::transcribe,
             asr::transcribe_audio_data,
+            tts::prepare_tts,
+            tts::get_tts_status,
+            tts::synthesize_tts,
+            tts::play_tts,
+            tts::cancel_tts_playback,
             vad_commands::start_listening,
             vad_commands::stop_listening,
             vad_commands::get_vad_state,

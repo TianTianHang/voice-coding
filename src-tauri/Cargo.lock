@@ -5672,6 +5672,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
+name = "tts-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5895,6 +5904,7 @@ version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
  "agent-client-protocol-tokio",
+ "async-trait",
  "cpal",
  "crossbeam-channel",
  "libloading 0.9.0",
@@ -5909,6 +5919,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tokio",
  "tokio-util",
+ "tts-core",
  "uuid",
 ]
 

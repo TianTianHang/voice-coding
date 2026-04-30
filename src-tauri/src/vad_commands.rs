@@ -75,6 +75,10 @@ impl VadRecorderState {
     fn current_active_session(&self) -> Option<u64> {
         *self.active_session.lock()
     }
+
+    pub fn has_active_session(&self) -> bool {
+        self.current_active_session().is_some()
+    }
 }
 
 fn is_session_active(active_session: &Arc<Mutex<Option<u64>>>, session_id: u64) -> bool {
