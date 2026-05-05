@@ -135,10 +135,12 @@ python scripts/verify_onnx_inputs.py
 
 ## Environment Variables
 - `STT_MODEL_DIR` - Path to model files (default: `./models`)
+- `MOSS_TTS_MODEL_DIR` - Path to MOSS TTS model directory (typically `models/moss-tts/MOSS-TTS-Nano-100M-ONNX` when downloaded with `scripts/download_moss_tts_models.sh`)
 - `ORT_DYLIB_PATH` - Path to ONNX Runtime library (handled by Nix setup)
 
 ## File Locations
 - Test audio: `test_audio/`
-- Models: `models/onnx_models/`
+- STT ONNX models: `models/onnx_models/` under the `STT_MODEL_DIR` root
+- MOSS TTS models: `models/moss-tts/`
 - Documentation: `docs/`
 - Build output: `dist/` (frontend), `src-tauri/target/` (Rust)
