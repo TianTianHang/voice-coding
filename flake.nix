@@ -163,7 +163,7 @@
             
             # ONNX Runtime configuration (use Nix package, avoid runtime download)
             export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime.so"
-            export STT_MODEL_DIR="$PWD/models"
+            export VOICE_CODING_MODEL_HOME="''${VOICE_CODING_MODEL_HOME:-$PWD/models}"
             export LD_LIBRARY_PATH="${pkgs.onnxruntime}/lib:$LD_LIBRARY_PATH"
             export LD_LIBRARY_PATH="${pkgs.libayatana-appindicator}/lib:$LD_LIBRARY_PATH"
             
@@ -195,12 +195,23 @@ pnpm run build || exit 1
             echo "🔧 pnpm: $(pnpm --version)"
             echo ""
             echo "🧠 ONNX Runtime: ${pkgs.onnxruntime.version} (from Nix)"
-            echo "📂 STT Models: $STT_MODEL_DIR"
-            
-            if [ ! -d "$STT_MODEL_DIR/onnx_models" ]; then
+            ASR_MODEL_DIR="$VOICE_CODING_MODEL_HOME/asr/qwen3-asr-0.6b-onnx"
+            TTS_MODEL_DIR="$VOICE_CODING_MODEL_HOME/tts/moss-tts-nano-100m-onnx"
+
+            echo "📂 Model Home: $VOICE_CODING_MODEL_HOME"
+            echo "🎙️  ASR Model: $ASR_MODEL_DIR"
+            echo "🔊 TTS Model: $TTS_MODEL_DIR"
+             
+            if [ ! -d "$ASR_MODEL_DIR/onnx_models" ]; then
               echo ""
-              echo "⚠️  STT models not found."
+              echo "⚠️  ASR model not found."
               echo "   Download with: bash scripts/download_model.sh"
+            fi
+
+            if [ ! -f "$TTS_MODEL_DIR/MOSS-TTS-Nano-100M-ONNX/browser_poc_manifest.json" ]; then
+              echo ""
+              echo "⚠️  TTS model not found."
+              echo "   Download with: bash scripts/download_moss_tts_models.sh"
             fi
 
             echo ""

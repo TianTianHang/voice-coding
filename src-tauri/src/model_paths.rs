@@ -94,7 +94,7 @@ impl ModelPathContext {
         Self {
             env: std::env::vars().collect(),
             app_data_dir: None,
-            dev_root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            dev_root: infer_dev_root(),
         }
     }
 
@@ -135,8 +135,21 @@ impl ModelPathContext {
     }
 
     fn dev_models_dir(&self) -> PathBuf {
-        self.dev_root.join("models")
+        normalize_dev_root(&self.dev_root).join("models")
     }
+}
+
+fn infer_dev_root() -> PathBuf {
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    normalize_dev_root(&current_dir)
+}
+
+fn normalize_dev_root(dev_root: &Path) -> PathBuf {
+    if dev_root.file_name().is_some_and(|name| name == "src-tauri") {
+        return dev_root.parent().unwrap_or(dev_root).to_path_buf();
+    }
+
+    dev_root.to_path_buf()
 }
 
 pub fn resolve_asr_model_path() -> ResolvedModelPath {
@@ -604,6 +617,26 @@ mod tests {
     }
 
     #[test]
+    fn tts_dev_fallback_uses_project_root_when_running_from_src_tauri() {
+        let fixture = Fixture::new();
+        fixture.write_complete_tts(&fixture.project_standard_tts_package_dir());
+        let context = ModelPathContext::for_test(fixture.dev_root.join("src-tauri"));
+
+        let resolved = resolve_tts_model_path_with_context(&context);
+
+        assert_eq!(resolved.source, ModelPathSource::DevFallback);
+        assert_eq!(
+            resolved.package_dir,
+            fixture.project_standard_tts_package_dir()
+        );
+        assert_eq!(
+            resolved.engine_model_dir,
+            fixture.project_standard_tts_engine_dir()
+        );
+        assert!(resolved.missing_files.is_empty());
+    }
+
+    #[test]
     fn tts_detects_legacy_dev_layout() {
         let fixture = Fixture::new();
         let legacy_package = fixture.dev_models_dir().join("moss-tts");
@@ -678,6 +711,15 @@ mod tests {
 
         fn standard_tts_engine_dir(&self) -> PathBuf {
             self.standard_tts_package_dir().join(MOSS_TTS_COMPONENT_DIR)
+        }
+
+        fn project_standard_tts_package_dir(&self) -> PathBuf {
+            standard_tts_package_dir(&self.dev_models_dir())
+        }
+
+        fn project_standard_tts_engine_dir(&self) -> PathBuf {
+            self.project_standard_tts_package_dir()
+                .join(MOSS_TTS_COMPONENT_DIR)
         }
 
         fn write_complete_asr(&self, dir: &Path) {

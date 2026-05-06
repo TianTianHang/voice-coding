@@ -31,11 +31,11 @@
 
 ## 5. 验证与质量门禁
 
-- [ ] 5.1 运行 `nix develop -c cargo test -p voice-coding`，验证 Tauri 后端路径解析与 runtime 集成测试
-- [ ] 5.2 运行 `nix develop -c cargo test -p stt-qwen3`，确认 Qwen3 ASR crate 行为未被路径管理改造破坏
-- [ ] 5.3 运行 `nix develop -c cargo test -p tts-moss`，确认 MOSS TTS crate 兼容入口和资产校验仍正常
-- [ ] 5.4 运行 `nix develop -c cargo clippy`，修复 Rust lint 问题
-- [ ] 5.5 运行 `pnpm test`，验证前端 hook 与组件测试
-- [ ] 5.6 运行 `pnpm build`，验证 TypeScript 类型和前端构建
-- [ ] 5.7 运行 `nix develop -c pnpm tauri build`，验证桌面应用集成构建
-- [ ] 5.8 手动执行或 dry-run 检查两个下载脚本的默认路径和显式路径提示，记录无法执行的外部网络依赖原因
+- [x] 5.1 运行 `nix develop -c cargo test -p voice-coding`，验证 Tauri 后端路径解析与 runtime 集成测试
+- [x] 5.2 运行 `nix develop -c cargo test -p stt-qwen3`，确认 Qwen3 ASR crate 行为未被路径管理改造破坏
+- [x] 5.3 运行 `nix develop -c cargo test -p tts-moss`，确认 MOSS TTS crate 兼容入口和资产校验仍正常
+- [x] 5.4 运行 `nix develop -c cargo clippy`，修复 Rust lint 问题
+- [x] 5.5 运行 `pnpm test`，验证前端 hook 与组件测试
+- [x] 5.6 运行 `pnpm build`，验证 TypeScript 类型和前端构建
+- [x] 5.7 运行 `nix develop -c pnpm tauri build`，验证桌面应用集成构建
+- [x] 5.8 手动执行或 dry-run 检查两个下载脚本的默认路径和显式路径提示，记录无法执行的外部网络依赖原因
