@@ -7,8 +7,9 @@ MOSS ONNX Text-to-Speech implementation crate. It validates model assets, tokeni
 - `Cargo.toml` contains engine-specific dependencies such as ONNX Runtime, ndarray, and sentencepiece.
 
 ## Model Contract
-- Runtime model dir comes from `MOSS_TTS_MODEL_DIR`; the download script places models under `models/moss-tts/MOSS-TTS-Nano-100M-ONNX` from the repository root.
-- The crate fallback is `../models/moss-tts/MOSS-TTS-Nano-100M-ONNX`, so set `MOSS_TTS_MODEL_DIR` explicitly when running from the repository root.
+- Tauri runtime resolves the model package through unified app-level model path management and passes the direct `MOSS-TTS-Nano-100M-ONNX` component directory to this crate.
+- `MossModelConfig::from_env()` remains a crate-level compatibility entry; `MOSS_TTS_MODEL_DIR` still means the direct `MOSS-TTS-Nano-100M-ONNX` component directory.
+- The standard app layout is `models/tts/moss-tts-nano-100m-onnx/`, with legacy `models/moss-tts/` supported by the Tauri runtime.
 - Required assets are declared by `browser_poc_manifest.json`, TTS metadata, codec metadata, tokenizer model, and related ONNX/external-data files.
 - Output must validate against `tts_core::TtsResult::validate_for_playback`: 48 kHz stereo PCM.
 

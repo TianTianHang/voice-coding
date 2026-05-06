@@ -11,6 +11,12 @@ use tauri::{AppHandle, Emitter};
 use tokio::sync::{Mutex, Notify};
 
 #[cfg(feature = "stt-qwen3")]
+use crate::model_paths::{
+    resolve_asr_model_path, resolve_asr_model_path_with_app, ModelPathSnapshot,
+    ResolvedModelPath,
+};
+
+#[cfg(feature = "stt-qwen3")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AsrLoadState {
@@ -27,6 +33,7 @@ pub struct AsrStatusSnapshot {
     pub state: AsrLoadState,
     pub engine_name: String,
     pub model_dir: String,
+    pub model: ModelPathSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -53,10 +60,12 @@ pub struct AsrRuntime {
 
 #[cfg(feature = "stt-qwen3")]
 impl AsrStatusSnapshot {
-    fn unloaded(model_dir: String) -> Self {
+    fn unloaded(model_path: ResolvedModelPath) -> Self {
+        let model_dir = model_path.engine_model_dir_string();
         Self {
             state: AsrLoadState::Unloaded,
-            engine_name: "qwen3-asr-0.6b".to_string(),
+            engine_name: model_path.engine_name.to_string(),
+            model: model_path.snapshot(),
             model_dir,
             phase: None,
             timing: None,
@@ -64,10 +73,12 @@ impl AsrStatusSnapshot {
         }
     }
 
-    fn loading(model_dir: String) -> Self {
+    fn loading(model_path: ResolvedModelPath) -> Self {
+        let model_dir = model_path.engine_model_dir_string();
         Self {
             state: AsrLoadState::Loading,
-            engine_name: "qwen3-asr-0.6b".to_string(),
+            engine_name: model_path.engine_name.to_string(),
+            model: model_path.snapshot(),
             model_dir,
             phase: Some("model".to_string()),
             timing: None,
@@ -75,10 +86,12 @@ impl AsrStatusSnapshot {
         }
     }
 
-    fn ready(model_dir: String, timing: Qwen3LoadTiming) -> Self {
+    fn ready(model_path: ResolvedModelPath, timing: Qwen3LoadTiming) -> Self {
+        let model_dir = model_path.engine_model_dir_string();
         Self {
             state: AsrLoadState::Ready,
-            engine_name: "qwen3-asr-0.6b".to_string(),
+            engine_name: model_path.engine_name.to_string(),
+            model: model_path.snapshot(),
             model_dir,
             phase: None,
             timing: Some(timing),
@@ -86,10 +99,16 @@ impl AsrStatusSnapshot {
         }
     }
 
-    fn failed(model_dir: String, error: String) -> Self {
+    fn failed(model_path: ResolvedModelPath, error: String) -> Self {
+        let model_dir = model_path.engine_model_dir_string();
+        let mut model = model_path.snapshot();
+        if model.error.is_none() {
+            model.error = Some(error.clone());
+        }
         Self {
             state: AsrLoadState::Failed,
-            engine_name: "qwen3-asr-0.6b".to_string(),
+            engine_name: model_path.engine_name.to_string(),
+            model,
             model_dir,
             phase: None,
             timing: None,
@@ -107,10 +126,10 @@ impl AsrRuntime {
     fn new_with_loader(
         loader: impl Fn(&str) -> Result<Qwen3AsrEngine, String> + Send + Sync + 'static,
     ) -> Self {
-        let model_dir = model_dir();
+        let model_path = resolve_asr_model_path();
         Self {
             inner: Mutex::new(AsrRuntimeInner {
-                snapshot: AsrStatusSnapshot::unloaded(model_dir),
+                snapshot: AsrStatusSnapshot::unloaded(model_path),
                 engine: None,
                 loading: None,
             }),
@@ -138,21 +157,29 @@ impl AsrRuntime {
                     }
                     AsrLoadState::Unloaded | AsrLoadState::Failed => {
                         let notify = Arc::new(Notify::new());
-                        let model_dir = model_dir();
+                        let model_path = app
+                            .as_ref()
+                            .map(resolve_asr_model_path_with_app)
+                            .unwrap_or_else(resolve_asr_model_path);
+                        let model_dir = model_path.engine_model_dir_string();
                         inner.engine = None;
                         inner.loading = Some(notify.clone());
-                        inner.snapshot = AsrStatusSnapshot::loading(model_dir.clone());
+                        inner.snapshot = AsrStatusSnapshot::loading(model_path.clone());
                         let snapshot = inner.snapshot.clone();
                         drop(inner);
                         emit_asr_status(app.as_ref(), &snapshot);
-                        LoadAction::Start { notify, model_dir }
+                        LoadAction::Start {
+                            notify,
+                            model_path,
+                            model_dir,
+                        }
                     }
                 }
             };
 
             match load {
                 LoadAction::Wait(notify) => notify.notified().await,
-                LoadAction::Start { notify, model_dir } => {
+                LoadAction::Start { notify, model_path, model_dir } => {
                     let loader = self.loader.clone();
                     let load_model_dir = model_dir.clone();
                     let load_result =
@@ -167,11 +194,11 @@ impl AsrRuntime {
                             Ok(engine) => {
                                 let timing = engine.load_timing();
                                 inner.engine = Some(Arc::new(engine));
-                                inner.snapshot = AsrStatusSnapshot::ready(model_dir, timing);
+                                inner.snapshot = AsrStatusSnapshot::ready(model_path, timing);
                             }
                             Err(error) => {
                                 inner.engine = None;
-                                inner.snapshot = AsrStatusSnapshot::failed(model_dir, error);
+                                inner.snapshot = AsrStatusSnapshot::failed(model_path, error);
                             }
                         }
                         inner.loading = None;
@@ -243,17 +270,13 @@ enum LoadAction {
     Wait(Arc<Notify>),
     Start {
         notify: Arc<Notify>,
+        model_path: ResolvedModelPath,
         model_dir: String,
     },
 }
 
 #[cfg(feature = "stt-qwen3")]
 static ASR_RUNTIME: once_cell::sync::Lazy<AsrRuntime> = once_cell::sync::Lazy::new(AsrRuntime::new);
-
-#[cfg(feature = "stt-qwen3")]
-fn model_dir() -> String {
-    std::env::var("STT_MODEL_DIR").unwrap_or_else(|_| "models".to_string())
-}
 
 #[cfg(feature = "stt-qwen3")]
 fn emit_asr_status(app: Option<&AppHandle>, snapshot: &AsrStatusSnapshot) {
@@ -429,6 +452,8 @@ mod tests {
         let status = runtime.status().await;
 
         assert_eq!(status.state, AsrLoadState::Unloaded);
+        assert_eq!(status.engine_name, status.model.engine_name);
+        assert_eq!(status.model_dir, status.model.model_dir);
         assert!(status.error.is_none());
     }
 
@@ -449,6 +474,7 @@ mod tests {
         assert_eq!(second.state, AsrLoadState::Failed);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
         assert_eq!(second.error.as_deref(), Some("missing model"));
+        assert_eq!(second.model.error.as_deref(), Some("missing model"));
     }
 
     #[cfg(feature = "stt-qwen3")]
@@ -488,14 +514,14 @@ mod tests {
         let first = tokio::spawn(async move { runtime_one.prepare(None).await });
 
         let mut seen_loading = false;
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if calls.load(Ordering::SeqCst) == 1
                 && runtime.status().await.state == AsrLoadState::Loading
             {
                 seen_loading = true;
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         assert!(seen_loading);
 
@@ -542,14 +568,14 @@ mod tests {
         let prepare_task = tokio::spawn(async move { prepare_runtime.prepare(None).await });
 
         let mut seen_loading = false;
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if calls.load(Ordering::SeqCst) == 1
                 && runtime.status().await.state == AsrLoadState::Loading
             {
                 seen_loading = true;
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         assert!(seen_loading);
 

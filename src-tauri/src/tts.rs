@@ -8,8 +8,9 @@ use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ}
 use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult};
 
 use crate::audio::{playback_buffer_from_tts, AudioOutput};
+use crate::model_paths::{resolve_tts_model_path, resolve_tts_model_path_with_app, ModelPathSnapshot};
 #[cfg(feature = "tts-moss-onnx")]
-use tts_moss::MossOnnxTtsEngine;
+use tts_moss::{MossModelConfig, MossOnnxTtsEngine};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -25,6 +26,8 @@ pub enum TtsState {
 #[serde(rename_all = "camelCase")]
 pub struct TtsStatusSnapshot {
     pub state: TtsState,
+    pub engine_name: String,
+    pub model: ModelPathSnapshot,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub has_buffered_audio: bool,
@@ -41,6 +44,38 @@ struct TtsRuntimeInner {
 pub struct TtsRuntime {
     inner: Arc<Mutex<TtsRuntimeInner>>,
     engine: Arc<dyn TtsEngine>,
+    engine_name: String,
+    model: ModelPathSnapshot,
+}
+
+#[cfg(feature = "tts-moss-onnx")]
+fn default_tts_model_snapshot() -> ModelPathSnapshot {
+    resolve_tts_model_path().snapshot()
+}
+
+#[cfg(not(feature = "tts-moss-onnx"))]
+fn default_tts_model_snapshot() -> ModelPathSnapshot {
+    ModelPathSnapshot {
+        kind: crate::model_paths::ModelKind::Tts,
+        model_id: crate::model_paths::MOSS_TTS_MODEL_ID.to_string(),
+        engine_name: crate::model_paths::MOSS_TTS_ENGINE_NAME.to_string(),
+        package_dir: String::new(),
+        model_dir: String::new(),
+        source: crate::model_paths::ModelPathSource::DevFallback,
+        legacy_layout: false,
+        missing_files: Vec::new(),
+        error: Some("TTS model path resolution is unavailable without MOSS ONNX TTS".to_string()),
+    }
+}
+
+#[cfg(feature = "tts-moss-onnx")]
+fn tts_model_snapshot_with_app(app: &AppHandle) -> ModelPathSnapshot {
+    resolve_tts_model_path_with_app(app).snapshot()
+}
+
+#[cfg(not(feature = "tts-moss-onnx"))]
+fn tts_model_snapshot_with_app(_app: &AppHandle) -> ModelPathSnapshot {
+    default_tts_model_snapshot()
 }
 
 impl Default for TtsRuntime {
@@ -52,7 +87,11 @@ impl Default for TtsRuntime {
 fn default_tts_engine() -> Arc<dyn TtsEngine> {
     #[cfg(feature = "tts-moss-onnx")]
     {
-        match MossOnnxTtsEngine::from_env() {
+        let model_path = resolve_tts_model_path();
+        let config = MossModelConfig {
+            model_dir: model_path.engine_model_dir,
+        };
+        match MossOnnxTtsEngine::new(config) {
             Ok(engine) => Arc::new(engine),
             Err(err) => Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string())),
         }
@@ -74,10 +113,23 @@ fn default_tts_engine() -> Arc<dyn TtsEngine> {
 
 impl TtsRuntime {
     pub fn new(engine: Arc<dyn TtsEngine>) -> Self {
+        Self::new_with_model(engine, default_tts_model_snapshot())
+    }
+
+    pub fn with_app(app: &AppHandle) -> Self {
+        let model = tts_model_snapshot_with_app(app);
+        let engine = default_tts_engine_with_model_dir(std::path::PathBuf::from(&model.model_dir));
+        Self::new_with_model(engine, model)
+    }
+
+    fn new_with_model(engine: Arc<dyn TtsEngine>, model: ModelPathSnapshot) -> Self {
+        let engine_name = engine.engine_name().to_string();
         Self {
             inner: Arc::new(Mutex::new(TtsRuntimeInner {
                 snapshot: TtsStatusSnapshot {
                     state: TtsState::Idle,
+                    engine_name: engine_name.clone(),
+                    model: model.clone(),
                     error: None,
                     has_buffered_audio: false,
                 },
@@ -87,6 +139,8 @@ impl TtsRuntime {
                 cancel_requested: false,
             })),
             engine,
+            engine_name,
+            model,
         }
     }
 
@@ -94,6 +148,8 @@ impl TtsRuntime {
         let snapshot = {
             let mut inner = self.inner.lock();
             inner.snapshot.state = state;
+            inner.snapshot.engine_name = self.engine_name.clone();
+            inner.snapshot.model = self.model.clone();
             inner.snapshot.error = error;
             inner.snapshot.has_buffered_audio = inner.latest_result.is_some();
             inner.snapshot.clone()
@@ -146,6 +202,20 @@ impl TtsRuntime {
     pub fn cancel_playback(&self) {
         self.inner.lock().cancel_requested = true;
     }
+}
+
+#[cfg(feature = "tts-moss-onnx")]
+fn default_tts_engine_with_model_dir(model_dir: std::path::PathBuf) -> Arc<dyn TtsEngine> {
+    let config = MossModelConfig { model_dir };
+    match MossOnnxTtsEngine::new(config) {
+        Ok(engine) => Arc::new(engine),
+        Err(err) => Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string())),
+    }
+}
+
+#[cfg(not(feature = "tts-moss-onnx"))]
+fn default_tts_engine_with_model_dir(_model_dir: std::path::PathBuf) -> Arc<dyn TtsEngine> {
+    default_tts_engine()
 }
 
 #[cfg(any(test, feature = "tts-mock"))]
@@ -380,6 +450,8 @@ mod tests {
 
         let status = runtime.status();
         assert_eq!(status.state, TtsState::Ready);
+        assert_eq!(status.engine_name, "mock-tts");
+        assert_eq!(status.model.kind, crate::model_paths::ModelKind::Tts);
         assert!(status.has_buffered_audio);
     }
 
@@ -392,6 +464,31 @@ mod tests {
 
         let status = runtime.status();
         assert_eq!(status.state, TtsState::Failed);
+        assert_eq!(status.engine_name, "fail");
+    }
+
+    #[tokio::test]
+    async fn status_events_are_complete_snapshots() {
+        let model = crate::model_paths::ResolvedModelPath {
+            kind: crate::model_paths::ModelKind::Tts,
+            model_id: crate::model_paths::MOSS_TTS_MODEL_ID,
+            engine_name: crate::model_paths::MOSS_TTS_ENGINE_NAME,
+            package_dir: std::path::PathBuf::from("models/tts/moss-tts-nano-100m-onnx"),
+            engine_model_dir: std::path::PathBuf::from("models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX"),
+            source: crate::model_paths::ModelPathSource::DevFallback,
+            legacy_layout: false,
+            missing_files: Vec::new(),
+            error: None,
+        }
+        .snapshot();
+        let runtime = TtsRuntime::new_with_model(Arc::new(MockTtsEngine), model.clone());
+
+        runtime.set_state(None, TtsState::Synthesizing, None);
+        let status = runtime.status();
+
+        assert_eq!(status.state, TtsState::Synthesizing);
+        assert_eq!(status.engine_name, "mock-tts");
+        assert_eq!(status.model, model);
     }
 
     #[tokio::test]

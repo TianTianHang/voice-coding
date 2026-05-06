@@ -134,13 +134,14 @@ python scripts/verify_onnx_inputs.py
 - Temporary audio files in `transcribe_audio_data` must be cleaned up on both success and failure paths.
 
 ## Environment Variables
-- `STT_MODEL_DIR` - Path to model files (default: `./models`)
-- `MOSS_TTS_MODEL_DIR` - Path to MOSS TTS model directory (typically `models/moss-tts/MOSS-TTS-Nano-100M-ONNX` when downloaded with `scripts/download_moss_tts_models.sh`)
+- `VOICE_CODING_MODEL_HOME` - Recommended root for local model assets (default development root: `./models`)
+- `STT_MODEL_DIR` - Compatibility override pointing directly to the Qwen3 ASR model directory
+- `MOSS_TTS_MODEL_DIR` - Compatibility override pointing directly to the `MOSS-TTS-Nano-100M-ONNX` component directory
 - `ORT_DYLIB_PATH` - Path to ONNX Runtime library (handled by Nix setup)
 
 ## File Locations
 - Test audio: `test_audio/`
-- STT ONNX models: `models/onnx_models/` under the `STT_MODEL_DIR` root
-- MOSS TTS models: `models/moss-tts/`
+- STT ONNX models: `models/asr/qwen3-asr-0.6b-onnx/onnx_models/` under the model home, with legacy `models/onnx_models/` fallback
+- MOSS TTS models: `models/tts/moss-tts-nano-100m-onnx/`, with legacy `models/moss-tts/` fallback
 - Documentation: `docs/`
 - Build output: `dist/` (frontend), `src-tauri/target/` (Rust)

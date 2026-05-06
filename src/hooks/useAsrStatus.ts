@@ -12,10 +12,37 @@ export type AsrLoadTiming = {
   melFilterbankMs: number;
 };
 
+export type ModelKind = "asr" | "tts";
+
+export type ModelPathSource =
+  | "engineEnv"
+  | "modelHomeEnv"
+  | "appData"
+  | "devFallback"
+  | "legacyDevFallback";
+
+export type MissingModelFile = {
+  path: string;
+  description: string;
+};
+
+export type ModelPathSnapshot = {
+  kind: ModelKind;
+  modelId: string;
+  engineName: string;
+  packageDir: string;
+  modelDir: string;
+  source: ModelPathSource;
+  legacyLayout: boolean;
+  missingFiles: MissingModelFile[];
+  error?: string;
+};
+
 export type AsrStatusSnapshot = {
   state: AsrLoadState;
   engineName: string;
   modelDir: string;
+  model: ModelPathSnapshot;
   phase?: string;
   timing?: AsrLoadTiming;
   error?: string;
@@ -30,6 +57,16 @@ export const initialAsrStatus: AsrStatusSnapshot = {
   state: "unloaded",
   engineName: "qwen3-asr-0.6b",
   modelDir: "",
+  model: {
+    kind: "asr",
+    modelId: "qwen3-asr-0.6b-onnx",
+    engineName: "qwen3-asr-0.6b",
+    packageDir: "",
+    modelDir: "",
+    source: "devFallback",
+    legacyLayout: false,
+    missingFiles: [],
+  },
 };
 
 export function replaceAsrStatusFromEvent(

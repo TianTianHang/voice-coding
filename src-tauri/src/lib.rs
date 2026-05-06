@@ -1,9 +1,10 @@
 mod acp;
 mod asr;
 mod audio;
+mod model_paths;
+mod tts;
 mod vad;
 mod vad_commands;
-mod tts;
 
 use parking_lot::Mutex;
 use tauri::menu::{Menu, MenuItem};
@@ -48,10 +49,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .manage(vad_commands::VadRecorderState::new())
         .manage(vad_commands::VadRuntimeConfigState::new())
-        .manage(tts::TtsRuntime::default())
         .manage(acp::AcpRuntime::default())
         .manage(AppLifecycleState::new())
         .setup(|app| {
+            app.manage(tts::TtsRuntime::with_app(app.handle()));
             #[cfg(feature = "stt-qwen3")]
             asr::prewarm_asr(app.handle().clone());
             setup_tray(app)?;

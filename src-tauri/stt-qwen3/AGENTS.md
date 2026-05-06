@@ -14,7 +14,8 @@ Qwen3 ASR implementation crate. It loads ONNX model sessions and tokenizer asset
 - `tests/` contains unit/integration/boundary coverage and shared fixtures.
 
 ## Model Contract
-- Default model root is provided by backend `STT_MODEL_DIR` handling, generally `./models`.
+- Default model root is provided by Tauri unified model path management, generally `models/asr/qwen3-asr-0.6b-onnx` under `VOICE_CODING_MODEL_HOME`.
+- `STT_MODEL_DIR` remains a compatibility override that points directly to the Qwen3 ASR model directory; legacy `./models` is still supported by the Tauri runtime.
 - Required assets include ONNX sessions under `onnx_models/`, plus embeddings and tokenizer files at the model root as expected by `models::session`.
 - ONNX Runtime dynamic library path is supplied by the Nix environment via `ORT_DYLIB_PATH`.
 

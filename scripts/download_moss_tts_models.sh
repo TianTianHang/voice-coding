@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_ROOT="${1:-models/moss-tts}"
+DEFAULT_MODEL_HOME="${VOICE_CODING_MODEL_HOME:-models}"
+MODEL_ROOT="${1:-${DEFAULT_MODEL_HOME}/tts/moss-tts-nano-100m-onnx}"
 TTS_REPO="OpenMOSS-Team/MOSS-TTS-Nano-100M-ONNX"
 CODEC_REPO="OpenMOSS-Team/MOSS-Audio-Tokenizer-Nano-ONNX"
 
@@ -103,3 +104,7 @@ echo "    MOSS-TTS-Nano-100M-ONNX/"
 echo "    MOSS-Audio-Tokenizer-Nano-ONNX/"
 echo
 echo "Done."
+echo "Recommended model root:"
+echo "  export VOICE_CODING_MODEL_HOME=\"${VOICE_CODING_MODEL_HOME:-models}\""
+echo "The MOSS engine also accepts an explicit component override:"
+echo "  export MOSS_TTS_MODEL_DIR=\"${TTS_DIR}\""

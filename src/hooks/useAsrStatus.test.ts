@@ -1,9 +1,22 @@
 import { describe, expect, it } from "vitest";
 import {
   asrStatusLabel,
+  initialAsrStatus,
   replaceAsrStatusFromEvent,
   type AsrStatusSnapshot,
+  type ModelPathSnapshot,
 } from "./useAsrStatus";
+
+const asrModel: ModelPathSnapshot = {
+  kind: "asr",
+  modelId: "qwen3-asr-0.6b-onnx",
+  engineName: "qwen3-asr-0.6b",
+  packageDir: "models/asr/qwen3-asr-0.6b-onnx",
+  modelDir: "models/asr/qwen3-asr-0.6b-onnx",
+  source: "devFallback",
+  legacyLayout: false,
+  missingFiles: [],
+};
 
 describe("asrStatusLabel", () => {
   it("maps ready snapshots with timing directly from the latest payload", () => {
@@ -11,6 +24,7 @@ describe("asrStatusLabel", () => {
       state: "ready",
       engineName: "qwen3-asr-0.6b",
       modelDir: "models",
+      model: asrModel,
       timing: {
         totalMs: 1200,
         onnxSessionsMs: 600,
@@ -28,6 +42,7 @@ describe("asrStatusLabel", () => {
       state: "failed",
       engineName: "qwen3-asr-0.6b",
       modelDir: "models",
+      model: { ...asrModel, error: "Embedding file not found" },
       error: "Embedding file not found",
     };
 
@@ -43,6 +58,7 @@ describe("replaceAsrStatusFromEvent", () => {
       state: "ready",
       engineName: "qwen3-asr-0.6b",
       modelDir: "models",
+      model: asrModel,
       timing: {
         totalMs: 900,
         onnxSessionsMs: 400,
@@ -55,9 +71,19 @@ describe("replaceAsrStatusFromEvent", () => {
       state: "loading",
       engineName: "qwen3-asr-0.6b",
       modelDir: "models",
+      model: { ...asrModel, source: "modelHomeEnv" },
       phase: "model",
     };
 
     expect(replaceAsrStatusFromEvent(current, incoming)).toEqual(incoming);
+  });
+
+  it("keeps model diagnostics as part of the initial full snapshot", () => {
+    expect(initialAsrStatus.model).toMatchObject({
+      kind: "asr",
+      modelId: "qwen3-asr-0.6b-onnx",
+      modelDir: "",
+      missingFiles: [],
+    });
   });
 });

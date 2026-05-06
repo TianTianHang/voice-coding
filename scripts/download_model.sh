@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_DIR="${1:-models}"
+DEFAULT_MODEL_HOME="${VOICE_CODING_MODEL_HOME:-models}"
+MODEL_DIR="${1:-${DEFAULT_MODEL_HOME}/asr/qwen3-asr-0.6b-onnx}"
 REPO="andrewleech/qwen3-asr-0.6b-onnx"
 export GIT_LFS_SKIP_SMUDGE=0
 echo "Downloading Qwen3-ASR-0.6B int4 ONNX models to ${MODEL_DIR}..."
@@ -74,5 +75,7 @@ else
 fi
 
 echo ""
-echo "Model download complete. Set environment variable:"
+echo "Model download complete. Recommended model root:"
+echo "  export VOICE_CODING_MODEL_HOME=\"${VOICE_CODING_MODEL_HOME:-models}\""
+echo "The ASR engine also accepts an explicit override:"
 echo "  export STT_MODEL_DIR=\"${MODEL_DIR}\""

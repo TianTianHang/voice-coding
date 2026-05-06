@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useBackendVAD, type VADState } from "../hooks/useBackendVAD";
-import { asrStatusLabel, useAsrStatus } from "../hooks/useAsrStatus";
+import {
+  asrStatusLabel,
+  useAsrStatus,
+  type ModelPathSnapshot,
+} from "../hooks/useAsrStatus";
 import {
   useAgentEvents,
   type AgentConnectionState,
@@ -17,6 +21,8 @@ type VadRuntimeConfig = {
 
 type TtsStatusSnapshot = {
   state: "idle" | "synthesizing" | "ready" | "playing" | "failed";
+  engineName: string;
+  model: ModelPathSnapshot;
   error?: string;
   hasBufferedAudio: boolean;
 };
@@ -517,6 +523,11 @@ export function AssistantConsole() {
                 <p className="text-xs text-slate-600">
                   Status: {ttsStatus ? `${ttsStatus.state}${ttsStatus.hasBufferedAudio ? " · buffered" : ""}` : "unknown"}
                 </p>
+                {ttsStatus && (
+                  <p className="text-xs text-slate-600">
+                    Engine: {ttsStatus.engineName} · Model: {ttsStatus.model.modelDir || "unresolved"}
+                  </p>
+                )}
                 {(ttsMessage || ttsStatus?.error) && (
                   <p className="text-xs font-semibold text-slate-700">{ttsMessage || ttsStatus?.error}</p>
                 )}
