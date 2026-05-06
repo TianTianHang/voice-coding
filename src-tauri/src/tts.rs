@@ -3,7 +3,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter};
 use tokio::time::{sleep, Duration};
-#[cfg(any(test, feature = "tts-mock"))]
+#[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
 use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
 use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult};
 
@@ -218,7 +218,7 @@ fn default_tts_engine_with_model_dir(_model_dir: std::path::PathBuf) -> Arc<dyn 
     default_tts_engine()
 }
 
-#[cfg(any(test, feature = "tts-mock"))]
+#[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
 struct MockTtsEngine;
 
 #[cfg(any(
@@ -259,7 +259,7 @@ impl TtsEngine for StartupErrorTtsEngine {
     }
 }
 
-#[cfg(any(test, feature = "tts-mock"))]
+#[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
 #[async_trait::async_trait]
 impl TtsEngine for MockTtsEngine {
     fn engine_name(&self) -> &str {

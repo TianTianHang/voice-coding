@@ -102,9 +102,7 @@ impl AsrStatusSnapshot {
     fn failed(model_path: ResolvedModelPath, error: String) -> Self {
         let model_dir = model_path.engine_model_dir_string();
         let mut model = model_path.snapshot();
-        if model.error.is_none() {
-            model.error = Some(error.clone());
-        }
+        model.error = Some(error.clone());
         Self {
             state: AsrLoadState::Failed,
             engine_name: model_path.engine_name.to_string(),
