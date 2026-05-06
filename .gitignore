@@ -28,6 +28,7 @@ dist-ssr
 models/
 
 test_audio
+test_outputs/
 
 .venv
 .codex

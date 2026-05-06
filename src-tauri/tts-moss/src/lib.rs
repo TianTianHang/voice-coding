@@ -3,11 +3,11 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use ndarray::{Array1, Array2, Array3};
+use ndarray::{s, Array1, Array2, Array3};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::session::SessionInputValue;
-use ort::value::{DynValue, TensorRef};
+use ort::value::{DynValue, TensorRef, Value};
 use sentencepiece::SentencePieceProcessor;
 use serde::Deserialize;
 use tts_core::{
@@ -463,12 +463,27 @@ impl MossSessions {
         request: MossRequestRows,
     ) -> Result<Vec<Vec<i64>>, MossTtsError> {
         let row_width = assets.row_width();
-        let input_ids = Array3::from_shape_vec((1, request.rows.len(), row_width), request.rows.concat())
+        let input_ids = Array3::from_shape_vec(
+            (1, request.rows.len(), row_width),
+            request
+                .rows
+                .concat()
+                .into_iter()
+                .map(to_i32)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
             .map_err(|e| MossTtsError::Inference {
                 stage: "tts_prefill",
                 detail: e.to_string(),
             })?;
-        let attention_mask = Array2::from_shape_vec((1, request.attention_mask.len()), request.attention_mask)
+        let attention_mask = Array2::from_shape_vec(
+            (1, request.attention_mask.len()),
+            request
+                .attention_mask
+                .into_iter()
+                .map(to_i32)
+                .collect::<Result<Vec<_>, _>>()?,
+        )
             .map_err(|e| MossTtsError::Inference {
                 stage: "tts_prefill",
                 detail: e.to_string(),
@@ -485,7 +500,7 @@ impl MossSessions {
                 detail: e.to_string(),
             })?;
 
-        let mut global_hidden = take_output(&mut outputs, "global_hidden", "tts_prefill")?;
+        let mut global_hidden = take_last_hidden_output(&mut outputs, "global_hidden", "tts_prefill")?;
         let mut decode_past = take_decode_present_outputs(&mut outputs, assets, "tts_prefill")?;
         let initial_past_valid_length = input_ids.shape()[1] as i64;
         drop(outputs);
@@ -509,7 +524,7 @@ impl MossSessions {
             }
             let frame = fixed.frame;
             let mut decode_outputs = self.run_decode_step(&frame, past_valid_length, decode_past, assets)?;
-            global_hidden = take_output(&mut decode_outputs, "global_hidden", "tts_decode_step")?;
+            global_hidden = take_last_hidden_output(&mut decode_outputs, "global_hidden", "tts_decode_step")?;
             decode_past = take_decode_present_outputs(&mut decode_outputs, assets, "tts_decode_step")?;
             drop(decode_outputs);
             frames.push(frame);
@@ -533,7 +548,7 @@ impl MossSessions {
     ) -> Result<GeneratedFrame, MossTtsError> {
         let n_vq = assets.n_vq();
         let codebook_size = assets.audio_codebook_size();
-        let mut seen = vec![0i64; n_vq * codebook_size];
+        let mut seen = vec![0i32; n_vq * codebook_size];
         for (channel, tokens) in previous_token_sets.iter().enumerate() {
             for (token, token_seen) in tokens.iter().enumerate() {
                 if *token_seen {
@@ -588,11 +603,15 @@ impl MossSessions {
         for (index, token) in frame.iter().take(assets.n_vq()).enumerate() {
             row[index + 1] = *token;
         }
-        let input_ids = Array3::from_shape_vec((1, 1, assets.row_width()), row).map_err(|e| MossTtsError::Inference {
+        let input_ids = Array3::from_shape_vec(
+            (1, 1, assets.row_width()),
+            row.into_iter().map(to_i32).collect::<Result<Vec<_>, _>>()?,
+        )
+        .map_err(|e| MossTtsError::Inference {
             stage: "tts_decode_step",
             detail: e.to_string(),
         })?;
-        let past_valid_lengths = Array1::from_vec(vec![past_valid_length]);
+        let past_valid_lengths = Array1::from_vec(vec![to_i32(past_valid_length)?]);
         let mut inputs = ort::inputs![
             "input_ids" => TensorRef::from_array_view(input_ids.view()).map_err(|e| MossTtsError::Inference { stage: "tts_decode_step", detail: e.to_string() })?,
             "past_valid_lengths" => TensorRef::from_array_view(past_valid_lengths.view()).map_err(|e| MossTtsError::Inference { stage: "tts_decode_step", detail: e.to_string() })?
@@ -610,14 +629,18 @@ impl MossSessions {
     fn decode_full(&mut self, audio_frames: Vec<Vec<i64>>) -> Result<TtsResult, MossTtsError> {
         let frames = audio_frames.len();
         let quantizers = audio_frames.first().map(Vec::len).unwrap_or(0);
-        let audio_codes = audio_frames.into_iter().flatten().collect::<Vec<_>>();
+        let audio_codes = audio_frames
+            .into_iter()
+            .flatten()
+            .map(to_i32)
+            .collect::<Result<Vec<_>, _>>()?;
         let codes = Array3::from_shape_vec((1, frames, quantizers), audio_codes).map_err(|e| {
             MossTtsError::Inference {
                 stage: "codec_decode_full",
                 detail: e.to_string(),
             }
         })?;
-        let lengths = Array1::from_vec(vec![frames as i64]);
+        let lengths = Array1::from_vec(vec![to_i32(frames as i64)?]);
         let lengths = lengths.into_shape_clone((1,)).map_err(|e| {
             MossTtsError::Inference {
                 stage: "codec_decode_full",
@@ -718,6 +741,13 @@ fn required_file<'a>(files: &'a HashMap<String, PathBuf>, key: &str) -> Result<&
         .get(key)
         .map(PathBuf::as_path)
         .ok_or_else(|| MossTtsError::MetadataMismatch(format!("missing model file key '{key}'")))
+}
+
+fn to_i32(value: i64) -> Result<i32, MossTtsError> {
+    i32::try_from(value).map_err(|_| MossTtsError::Inference {
+        stage: "tensor_cast",
+        detail: format!("value {value} does not fit in int32 tensor input"),
+    })
 }
 
 fn validate_meta_consistency(
@@ -824,6 +854,47 @@ fn take_output(
     })
 }
 
+fn take_last_hidden_output(
+    outputs: &mut ort::session::SessionOutputs<'_>,
+    name: &str,
+    stage: &'static str,
+) -> Result<DynValue, MossTtsError> {
+    let value = take_output(outputs, name, stage)?;
+    let (shape, data) = value.try_extract_tensor::<f32>().map_err(|e| MossTtsError::Inference {
+        stage,
+        detail: e.to_string(),
+    })?;
+    match shape.as_ref() {
+        [1, _, hidden_size] => {
+            let hidden_size = *hidden_size as usize;
+            let seq_len = shape[1] as usize;
+            if seq_len == 0 {
+                return Err(MossTtsError::Inference {
+                    stage,
+                    detail: format!("output '{name}' has empty sequence axis"),
+                });
+            }
+            let hidden = Array3::from_shape_vec((1, seq_len, hidden_size), data.to_vec())
+                .map_err(|e| MossTtsError::Inference {
+                    stage,
+                    detail: e.to_string(),
+                })?;
+            let last_hidden = hidden.slice(s![0..1, seq_len - 1, ..]).to_owned();
+            Value::from_array(last_hidden)
+                .map(|tensor| tensor.into_dyn())
+                .map_err(|e| MossTtsError::Inference {
+                    stage,
+                    detail: e.to_string(),
+                })
+        }
+        [1, _] => Ok(value),
+        other => Err(MossTtsError::Inference {
+            stage,
+            detail: format!("unexpected output '{name}' shape {other:?}"),
+        }),
+    }
+}
+
 fn take_decode_present_outputs(
     outputs: &mut ort::session::SessionOutputs<'_>,
     assets: &MossAssets,
@@ -843,14 +914,18 @@ fn extract_i64_tensor(
     name: &str,
     stage: &'static str,
 ) -> Result<Vec<i64>, MossTtsError> {
-    outputs
+    let value = outputs
         .get(name)
         .ok_or_else(|| MossTtsError::Inference {
             stage,
             detail: format!("missing output '{name}'"),
-        })?
-        .try_extract_tensor::<i64>()
-        .map(|(_, data)| data.to_vec())
+        })?;
+    if let Ok((_, data)) = value.try_extract_tensor::<i64>() {
+        return Ok(data.to_vec());
+    }
+    value
+        .try_extract_tensor::<i32>()
+        .map(|(_, data)| data.iter().map(|value| *value as i64).collect())
         .map_err(|e| MossTtsError::Inference {
             stage,
             detail: e.to_string(),
