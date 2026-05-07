@@ -154,6 +154,23 @@ fn vad_pcm_audio_input(samples: Vec<i16>) -> AudioInput {
     AudioInput::Samples(pcm_i16_to_f32(&samples), SAMPLE_RATE)
 }
 
+fn send_prompt_to_agent_in_background(app: AppHandle, session_id: u64, prompt: String) {
+    tauri::async_runtime::spawn(async move {
+        let runtime = app.state::<crate::acp::AcpRuntime>();
+        if let Err(e) = runtime.send_prompt(app.clone(), prompt).await {
+            log::warn!(
+                "failed to send transcript to ACP agent: session_id={} error={}",
+                session_id,
+                e
+            );
+            crate::acp::session::emit_agent_event(
+                &app,
+                crate::acp::AgentEvent::error(format!("Failed to send current sentence: {e}")),
+            );
+        }
+    });
+}
+
 async fn transcribe_audio_internal(
     _app: AppHandle,
     audio_data: Vec<i16>,
@@ -288,21 +305,11 @@ pub async fn start_listening(
                                     "transcript",
                                     serde_json::json!({ "text": text, "sessionId": session_id }),
                                 );
-                                let runtime = app_clone.state::<crate::acp::AcpRuntime>();
-                                if let Err(e) = runtime.send_prompt(app_clone.clone(), prompt).await
-                                {
-                                    log::warn!(
-                                        "failed to send transcript to ACP agent: session_id={} error={}",
-                                        session_id,
-                                        e
-                                    );
-                                    crate::acp::session::emit_agent_event(
-                                        &app_clone,
-                                        crate::acp::AgentEvent::error(format!(
-                                            "Failed to send current sentence: {e}"
-                                        )),
-                                    );
-                                }
+                                send_prompt_to_agent_in_background(
+                                    app_clone.clone(),
+                                    session_id,
+                                    prompt,
+                                );
                             }
                         }
                         Err(e) => {
@@ -428,6 +435,44 @@ pub fn stop_listening(
     }
 
     Ok(())
+}
+
+pub fn pause_listening_for_playback(
+    state: tauri::State<'_, VadRecorderState>,
+) -> Result<bool, String> {
+    let Some(session_id) = state.current_active_session() else {
+        return Ok(false);
+    };
+
+    let guard = state.recorder.lock();
+    let Some(recorder) = guard.as_ref() else {
+        return Ok(false);
+    };
+
+    log::info!("pausing VAD session for playback: session_id={session_id}");
+    let sm = recorder.state_machine();
+    let mut sm = sm.lock();
+    sm.stop();
+    Ok(true)
+}
+
+pub fn resume_listening_after_playback(
+    state: tauri::State<'_, VadRecorderState>,
+) -> Result<bool, String> {
+    let Some(session_id) = state.current_active_session() else {
+        return Ok(false);
+    };
+
+    let guard = state.recorder.lock();
+    let Some(recorder) = guard.as_ref() else {
+        return Ok(false);
+    };
+
+    log::info!("resuming VAD session after playback: session_id={session_id}");
+    let sm = recorder.state_machine();
+    let mut sm = sm.lock();
+    sm.start();
+    Ok(true)
 }
 
 #[tauri::command]

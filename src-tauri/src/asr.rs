@@ -238,6 +238,7 @@ impl AsrRuntime {
         &self,
         app: Option<AppHandle>,
     ) -> Result<Arc<Qwen3AsrEngine>, String> {
+        let mut waited_for_loading = false;
         loop {
             let wait = {
                 let inner = self.inner.lock().await;
@@ -254,6 +255,7 @@ impl AsrRuntime {
                             .expect("loading notify exists")
                             .clone(),
                     ),
+                    AsrLoadState::Failed if !waited_for_loading => None,
                     AsrLoadState::Failed => {
                         return Err(format!(
                             "ASR model failed to load: {}",
@@ -270,6 +272,7 @@ impl AsrRuntime {
 
             if let Some(notify) = wait {
                 notify.notified().await;
+                waited_for_loading = true;
             } else {
                 let snapshot = self.prepare(app.clone()).await;
                 if snapshot.state == AsrLoadState::Failed {
@@ -441,8 +444,13 @@ pub async fn transcribe_audio_data(
 
         let cleanup_result = cleanup_temp_audio_file(&file_path);
 
-        match (transcription_result, cleanup_result) {
-            (Ok(text), Ok(())) => {
+        match transcription_result {
+            Ok(text) => {
+                if let Err(cleanup_err) = cleanup_result {
+                    log::warn!(
+                        "ASR transcription succeeded but temp cleanup failed: {cleanup_err}"
+                    );
+                }
                 log::info!(
                     "ASR audio-data transcription finished in {}ms: chars={}",
                     started.elapsed().as_millis(),
@@ -450,11 +458,10 @@ pub async fn transcribe_audio_data(
                 );
                 Ok(text)
             }
-            (Ok(_), Err(cleanup_err)) => {
-                log::warn!("ASR transcription succeeded but temp cleanup failed: {cleanup_err}");
-                Err(cleanup_err)
-            }
-            (Err(transcription_err), _) => {
+            Err(transcription_err) => {
+                if let Err(cleanup_err) = cleanup_result {
+                    log::warn!("ASR temp cleanup failed after transcription error: {cleanup_err}");
+                }
                 log::error!(
                     "ASR audio-data transcription failed after {}ms: {}",
                     started.elapsed().as_millis(),
