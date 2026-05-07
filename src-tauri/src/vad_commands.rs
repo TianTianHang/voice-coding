@@ -1,11 +1,11 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioRecorder;
-use crate::vad::{SAMPLE_RATE, THRESHOLD, VadConfig, VadState};
+use crate::vad::{VadConfig, VadState, SAMPLE_RATE, THRESHOLD};
 use stt_core::{AudioInput, SttEngine};
 
 pub struct VadRecorderState {

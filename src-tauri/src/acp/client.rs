@@ -1,4 +1,3 @@
-use agent_client_protocol::Responder;
 use agent_client_protocol::schema::{
     AvailableCommandInput, ConfigOptionUpdate, ContentBlock, ContentChunk, CurrentModeUpdate,
     EmbeddedResourceResource, PermissionOption, PermissionOptionKind, Plan,
@@ -6,6 +5,7 @@ use agent_client_protocol::schema::{
     SelectedPermissionOutcome, SessionInfoUpdate, SessionNotification, SessionUpdate, ToolCall,
     ToolCallContent, ToolCallUpdate, ToolCallUpdateFields,
 };
+use agent_client_protocol::Responder;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -826,14 +826,12 @@ mod tests {
                 .as_deref(),
             Some("build")
         );
-        assert!(
-            config
-                .session_state
-                .as_ref()
-                .unwrap()
-                .config_options
-                .is_empty()
-        );
+        assert!(config
+            .session_state
+            .as_ref()
+            .unwrap()
+            .config_options
+            .is_empty());
         assert_eq!(
             info.session_state
                 .as_ref()

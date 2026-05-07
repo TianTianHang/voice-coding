@@ -115,7 +115,7 @@ fn normalize_tts_text(text: &str) -> String {
         output.push(ch);
         previous = Some(ch);
     }
-    output
+    ensure_terminal_sentence_punctuation(output)
 }
 
 fn normalize_char(ch: char) -> char {
@@ -151,7 +151,10 @@ fn natural_segments(text: &str) -> Vec<&str> {
     if start < text.len() {
         segments.push(text[start..].trim());
     }
-    segments.into_iter().filter(|segment| !segment.is_empty()).collect()
+    segments
+        .into_iter()
+        .filter(|segment| !segment.is_empty())
+        .collect()
 }
 
 fn split_oversized_segment<F, E>(
@@ -210,16 +213,37 @@ fn join_segment(current: &str, segment: &str) -> String {
 fn is_boundary(ch: char) -> bool {
     matches!(
         ch,
-        '.' | '!' | '?' | ',' | ';' | ':' | '\n' | '\r' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}'
-            | '\u{ff0c}' | '\u{3001}' | '\u{ff1b}' | '\u{ff1a}'
+        '.' | '!'
+            | '?'
+            | ','
+            | ';'
+            | ':'
+            | '\n'
+            | '\r'
+            | '\u{3002}'
+            | '\u{ff01}'
+            | '\u{ff1f}'
+            | '\u{ff0c}'
+            | '\u{3001}'
+            | '\u{ff1b}'
+            | '\u{ff1a}'
     )
 }
 
+fn ensure_terminal_sentence_punctuation(mut text: String) -> String {
+    if text.is_empty() || text.ends_with(is_terminal_sentence_punctuation) {
+        return text;
+    }
+    text.push('\u{3002}');
+    text
+}
+
+fn is_terminal_sentence_punctuation(ch: char) -> bool {
+    matches!(ch, '.' | '!' | '?' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}')
+}
+
 fn is_tight_punctuation(ch: char) -> bool {
-    matches!(
-        ch,
-        '.' | '!' | '?' | ',' | ';' | ':' | ')' | '"' | '\''
-    )
+    matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | ')' | '"' | '\'')
 }
 
 fn is_opening_punctuation(ch: char) -> bool {
@@ -251,8 +275,18 @@ mod tests {
 
         assert_eq!(
             prep.normalize("  你好   World１２３ ，  ready？\nOK  "),
-            "你好 World123, ready? OK"
+            "你好 World123, ready? OK。"
         );
+    }
+
+    #[test]
+    fn appends_terminal_sentence_punctuation_when_missing() {
+        let prep = MossTextPreprocessor::default();
+
+        assert_eq!(prep.normalize("你好"), "你好。");
+        assert_eq!(prep.normalize("你好。"), "你好。");
+        assert_eq!(prep.normalize("hello?"), "hello?");
+        assert_eq!(prep.normalize("暂停，"), "暂停,。");
     }
 
     #[test]
@@ -275,8 +309,11 @@ mod tests {
         let chunks = prep.prepare("     abcdef     ", char_tokens).unwrap();
 
         assert_eq!(
-            chunks.iter().map(|chunk| chunk.text.as_str()).collect::<Vec<_>>(),
-            vec!["abc", "def"]
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["abc", "def", "\u{3002}"]
         );
     }
 }

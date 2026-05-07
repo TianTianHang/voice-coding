@@ -37,7 +37,10 @@ async fn synthesizes_playback_ready_audio_with_greedy_streaming_decode() {
     eprintln!("MOSS_TTS_MODEL_DIR={model_dir}");
 
     let engine = MossOnnxTtsEngine::from_env().expect("MOSS engine should initialize");
-    assert!(engine.health_check().await.expect("health check should pass"));
+    assert!(engine
+        .health_check()
+        .await
+        .expect("health check should pass"));
 
     let result = engine
         .synthesize(
@@ -71,12 +74,17 @@ async fn synthesizes_playback_ready_audio() {
     let started = Instant::now();
     let engine = MossOnnxTtsEngine::from_env().expect("MOSS engine should initialize");
     assert_eq!(engine.engine_name(), "moss-onnx-tts");
-    assert!(engine.health_check().await.expect("health check should pass"));
+    assert!(engine
+        .health_check()
+        .await
+        .expect("health check should pass"));
     eprintln!("model load/health check elapsed: {:?}", started.elapsed());
 
     let synth_started = Instant::now();
+    let text =
+        std::env::var("MOSS_TTS_TEXT").unwrap_or_else(|_| "你好，欢迎使用语音编程。".to_string());
     let result = engine
-        .synthesize("你好，欢迎使用语音编程。", TtsConfig::default())
+        .synthesize(&text, TtsConfig::default())
         .await
         .expect("MOSS synthesis should succeed");
     let synth_elapsed = synth_started.elapsed();
@@ -97,7 +105,10 @@ async fn synthesizes_playback_ready_audio() {
         }
         PcmData::F32(samples) => {
             assert!(!samples.is_empty(), "f32 PCM should not be empty");
-            assert!(samples.iter().all(|sample| sample.is_finite()), "PCM samples must be finite");
+            assert!(
+                samples.iter().all(|sample| sample.is_finite()),
+                "PCM samples must be finite"
+            );
             "f32"
         }
     };

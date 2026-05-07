@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
-use tts_core::{AudioBuffer, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ, PcmData};
+use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
 
 #[derive(Debug)]
 pub enum AudioOutputError {
@@ -40,6 +40,11 @@ impl PlaybackBuffer {
 
     pub fn samples(&self) -> Arc<Vec<f32>> {
         self.samples.clone()
+    }
+
+    pub fn duration(&self) -> std::time::Duration {
+        let frames = self.samples.len() / PLAYBACK_CHANNELS as usize;
+        std::time::Duration::from_secs_f64(frames as f64 / PLAYBACK_SAMPLE_RATE_HZ as f64)
     }
 }
 
@@ -128,10 +133,6 @@ impl AudioOutput {
         queue.extend(buffer.samples().iter().copied());
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.queue.lock().is_empty()
-    }
-
     pub fn clear(&self) {
         self.queue.lock().clear();
     }
@@ -156,5 +157,12 @@ mod tests {
         assert_eq!(samples[1], 0.5);
         assert_eq!(samples[2], -1.0);
         assert!((samples[3] - 32767.0 / 32768.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn playback_buffer_reports_duration_from_frames() {
+        let buffer = PlaybackBuffer::from_samples(vec![0.0; PLAYBACK_SAMPLE_RATE_HZ as usize * 2]);
+
+        assert_eq!(buffer.duration(), std::time::Duration::from_secs(1));
     }
 }

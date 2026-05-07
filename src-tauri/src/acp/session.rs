@@ -8,10 +8,10 @@ use parking_lot::Mutex;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
 
 use super::client::{
-    AgentResultTracker, PendingPermissions, VoiceCodingAcpClient, respond_pending_permission,
+    respond_pending_permission, AgentResultTracker, PendingPermissions, VoiceCodingAcpClient,
 };
 use super::events::{AgentEvent, AgentStatus};
 use super::profile::AgentProfile;

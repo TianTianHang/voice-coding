@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, Notify};
 
 #[cfg(feature = "stt-qwen3")]
 use crate::model_paths::{
-    ModelPathSnapshot, ResolvedModelPath, resolve_asr_model_path, resolve_asr_model_path_with_app,
+    resolve_asr_model_path, resolve_asr_model_path_with_app, ModelPathSnapshot, ResolvedModelPath,
 };
 
 #[cfg(feature = "stt-qwen3")]

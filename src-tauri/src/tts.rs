@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
@@ -75,6 +76,7 @@ struct TtsRuntimeInner {
     snapshot: TtsStatusSnapshot,
     latest_result: Option<TtsResult>,
     output: Option<AudioOutput>,
+    playback_epoch: u64,
     paused_recording: bool,
     cancel_requested: bool,
     auto: AutoTtsState,
@@ -175,6 +177,7 @@ impl TtsRuntime {
                 },
                 latest_result: None,
                 output: None,
+                playback_epoch: 0,
                 paused_recording: false,
                 cancel_requested: false,
                 auto: AutoTtsState {
@@ -234,6 +237,14 @@ impl TtsRuntime {
         self.inner.lock().snapshot.clone()
     }
 
+    fn stop_playback_locked(inner: &mut TtsRuntimeInner) {
+        inner.playback_epoch = inner.playback_epoch.wrapping_add(1);
+        inner.cancel_requested = true;
+        if let Some(output) = inner.output.take() {
+            output.clear();
+        }
+    }
+
     pub fn auto_status(&self) -> AutoTtsStatusSnapshot {
         let inner = self.inner.lock();
         Self::auto_snapshot_locked(&inner)
@@ -282,6 +293,10 @@ impl TtsRuntime {
         text: String,
         config: TtsConfig,
     ) -> Result<TtsStatusSnapshot, String> {
+        {
+            let mut inner = self.inner.lock();
+            Self::stop_playback_locked(&mut inner);
+        }
         self.set_state(app, TtsState::Synthesizing, None);
 
         let result = self
@@ -302,7 +317,8 @@ impl TtsRuntime {
     }
 
     pub fn cancel_playback(&self) {
-        self.inner.lock().cancel_requested = true;
+        let mut inner = self.inner.lock();
+        Self::stop_playback_locked(&mut inner);
     }
 
     pub async fn play_buffered(
@@ -313,6 +329,7 @@ impl TtsRuntime {
     ) -> Result<TtsStatusSnapshot, String> {
         let buffer = {
             let mut inner = self.inner.lock();
+            Self::stop_playback_locked(&mut inner);
             inner.cancel_requested = false;
             let result = inner
                 .latest_result
@@ -346,27 +363,29 @@ impl TtsRuntime {
             }
         };
 
+        let playback_deadline = Instant::now() + buffer.duration();
         output.enqueue(buffer);
+        let playback_epoch = {
+            let mut inner = self.inner.lock();
+            inner.playback_epoch = inner.playback_epoch.wrapping_add(1);
+            inner.cancel_requested = false;
+            inner.output = Some(output);
+            inner.playback_epoch
+        };
         {
             let mut inner = self.inner.lock();
-            inner.output = Some(output);
+            inner.snapshot.has_buffered_audio = inner.latest_result.is_some();
         }
 
         loop {
-            let (cancelled, done) = {
+            let should_stop = {
                 let inner = self.inner.lock();
-                let done = inner.output.as_ref().map(|o| o.is_empty()).unwrap_or(true);
-                (inner.cancel_requested, done)
+                inner.cancel_requested || inner.playback_epoch != playback_epoch
             };
-
-            if cancelled {
-                if let Some(output) = self.inner.lock().output.as_ref() {
-                    output.clear();
-                }
+            if should_stop {
                 break;
             }
-
-            if done {
+            if Instant::now() >= playback_deadline {
                 break;
             }
 
@@ -375,15 +394,26 @@ impl TtsRuntime {
 
         {
             let mut inner = self.inner.lock();
-            inner.output.take();
+            if inner.playback_epoch == playback_epoch {
+                inner.output.take();
+            }
         }
 
-        if self.inner.lock().paused_recording {
+        let should_resume_recording = {
+            let inner = self.inner.lock();
+            inner.playback_epoch == playback_epoch && inner.paused_recording
+        };
+        if should_resume_recording {
             crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await?;
-            self.inner.lock().paused_recording = false;
+            let mut inner = self.inner.lock();
+            if inner.playback_epoch == playback_epoch {
+                inner.paused_recording = false;
+            }
         }
 
-        self.set_state(Some(&app), TtsState::Idle, None);
+        if self.inner.lock().playback_epoch == playback_epoch {
+            self.set_state(Some(&app), TtsState::Idle, None);
+        }
         Ok(self.status())
     }
 
@@ -768,6 +798,19 @@ mod tests {
             .synthesize(None, "hello".to_string(), TtsConfig::default())
             .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn synthesis_invalidates_prior_playback_epoch() {
+        let runtime = TtsRuntime::new(Arc::new(MockTtsEngine));
+        let starting_epoch = runtime.inner.lock().playback_epoch;
+
+        runtime
+            .synthesize(None, "hello".to_string(), TtsConfig::default())
+            .await
+            .expect("synthesis should work");
+
+        assert!(runtime.inner.lock().playback_epoch > starting_epoch);
     }
 
     #[test]

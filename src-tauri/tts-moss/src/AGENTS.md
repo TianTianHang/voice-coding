@@ -3,7 +3,13 @@
 Source for the MOSS ONNX TTS engine.
 
 ## Folder Role
-- `lib.rs` handles model manifest loading, metadata validation, tokenizer setup, voice selection, ONNX inference, codec decoding, and `TtsEngine` implementation.
+- `lib.rs` is the crate entry point and keeps the unit tests plus split implementation includes.
+- `config.rs` and `error.rs` define public configuration and crate errors.
+- `assets.rs` loads model manifests, validates file layouts, and resolves built-in voices.
+- `engine.rs` implements tokenizer setup, synthesis preparation, chunk concatenation, and the `TtsEngine` wrapper.
+- `sessions.rs` owns ONNX session creation and TTS/codec inference helpers.
+- `metadata.rs` contains manifest/meta structs and codec streaming state structures.
+- `codec_buffer.rs`, `reference_audio.rs`, and `text.rs` contain focused codec PCM buffering, reference audio loading, and text preprocessing helpers.
 - Keep all MOSS-specific assumptions in this crate and communicate with the app through `tts-core` types.
 
 ## Relationships
