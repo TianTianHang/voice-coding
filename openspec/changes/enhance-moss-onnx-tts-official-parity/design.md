@@ -79,6 +79,54 @@ reference audio file/data
 
 若 decode step 状态维护或模型输出不满足契约，可配置回退到 `decode_full`，但必须记录状态并让测试覆盖 fallback。
 
+#### 4a) `CodecDecodeStepState` 必须显式建模
+
+`moss_audio_tokenizer_decode_step.onnx` 不是无状态 decoder。除 `audio_codes` 和 `audio_code_lengths` 外，它还需要每次传入并更新：
+
+- 4 个 transformer offsets：`transformer_offset_0..3`；
+- 12 个 attention offsets：`attn_offset_0..11`；
+- 12 组 cached keys：`attn_cached_keys_0..11`；
+- 12 组 cached values：`attn_cached_values_0..11`；
+- 12 组 cached positions：`attn_cached_positions_0..11`。
+
+实现 SHALL 新增 `CodecDecodeStepState` 或等效结构，从 codec meta 的 `streaming_decode.transformer_offsets` 与 `streaming_decode.attention_caches` 初始化所有状态 tensor。初始化规则必须只依赖 metadata 中的 `shape`、`dtype`、`input_name` 与 `output_name`，避免把 500/800/1200/1600 等 cache 长度硬编码散落在推理逻辑中。
+
+每次 decode step 调用后，状态结构 MUST 从对应 `*_out_*` 输出中取回下一轮输入值；ONNX `DynValue` 生命周期不得逃出持有 `MossSessions` 的同步推理作用域。若为了规避 `DynValue` 生命周期问题需要复制为 owned ndarray/Vec，再在下一轮重新构造 tensor，这是可接受的，优先保证正确性和线程安全。
+
+#### 4b) streaming chunk 缓存与 fallback 边界
+
+内部 streaming decode 应由一个小的策略函数决定：
+
+```
+frames -> frame batches -> decode_step(state) -> pcm_chunks -> concat -> TtsResult
+```
+
+当且仅当 decode step 初始化成功、每个 batch 输出合法 PCM，且最终拼接满足 48kHz stereo playback contract 时，系统才使用 streaming decode 结果。任何以下情况 MUST 触发 `decode_full` fallback 或返回带 `codec_decode_step` 阶段标识的错误：
+
+- metadata 缺少 state 初始化需要的 shape/name/dtype；
+- decode step session 缺少 required input/output；
+- cache tensor shape 与 metadata 不一致；
+- 输出 `audio` 或 `audio_lengths` 形状不满足播放契约；
+- batch 解码过程中 ONNX 推理失败。
+
+fallback 成功时，外部 `TtsResult` 与当前 `decode_full` 路径等价；fallback 失败时，TTS runtime MUST remain in failed/synthesizing error path and MUST NOT enter `ready` or `playing`.
+
+#### 4c) 测试策略
+
+无模型单元测试应覆盖：
+
+- 从 `streaming_decode` metadata 构造初始 state tensor descriptors；
+- state input/output name 映射；
+- PCM chunk 追加和最终拼接；
+- decode step 错误转 `decode_full` fallback；
+- fallback 失败时错误包含 `codec_decode_step`。
+
+真实模型 `#[ignore]` 测试应覆盖：
+
+- 同一段 generated frames 下 `decode_step` 输出可形成合法 48kHz stereo PCM；
+- streaming decode 与 `decode_full` 的时长/shape 在容忍范围内一致；
+- 多 batch 解码时 state 能跨 batch 更新。
+
 ### 5) session 校验覆盖所有被加载模型
 
 `MossSessions::load` 应校验 prefill、decode step、local fixed、local greedy/decoder、codec encode、codec decode full、codec decode step 的关键输入输出。校验基于 meta 文件声明和实现实际使用名称双重检查：meta 缺失时报 metadata mismatch，模型缺输入输出时报 session I/O mismatch。

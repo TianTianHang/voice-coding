@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::time::{Duration, sleep};
+use tokio::time::{sleep, Duration};
 #[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
-use tts_core::{AudioBuffer, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ, PcmData};
+use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
 use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult};
 
-use crate::audio::{AudioOutput, playback_buffer_from_tts};
+use crate::audio::{playback_buffer_from_tts, AudioOutput};
 use crate::model_paths::{
-    ModelPathSnapshot, resolve_tts_model_path, resolve_tts_model_path_with_app,
+    resolve_tts_model_path, resolve_tts_model_path_with_app, ModelPathSnapshot,
 };
 #[cfg(feature = "tts-moss-onnx")]
 use tts_moss::{MossModelConfig, MossOnnxTtsEngine};
@@ -597,9 +597,10 @@ pub async fn synthesize_tts(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
     text: String,
+    config: Option<TtsConfig>,
 ) -> Result<TtsStatusSnapshot, String> {
     runtime
-        .synthesize(Some(&app), text, TtsConfig::default())
+        .synthesize(Some(&app), text, config.unwrap_or_default())
         .await
 }
 

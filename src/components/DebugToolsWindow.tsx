@@ -11,11 +11,36 @@ type VadRuntimeConfig = {
   threshold: number;
 };
 
+type MossSamplingMode = "fixed" | "greedy";
+
+export type TtsInvokeConfig = {
+  moss?: {
+    samplingMode?: MossSamplingMode;
+    referenceAudioPath?: string;
+  };
+};
+
+export function buildTtsInvokeConfig(
+  samplingMode: MossSamplingMode,
+  referenceAudioPath: string,
+): TtsInvokeConfig {
+  const path = referenceAudioPath.trim();
+  return {
+    moss: {
+      samplingMode,
+      ...(path ? { referenceAudioPath: path } : {}),
+    },
+  };
+}
+
 export function DebugToolsWindow() {
   const [vadThresholdInput, setVadThresholdInput] = useState("0.5");
   const [vadConfigMessage, setVadConfigMessage] = useState<string | null>(null);
   const [isSavingVadConfig, setIsSavingVadConfig] = useState(false);
   const [ttsText, setTtsText] = useState("你好。");
+  const [ttsSamplingMode, setTtsSamplingMode] =
+    useState<MossSamplingMode>("fixed");
+  const [ttsReferenceAudioPath, setTtsReferenceAudioPath] = useState("");
   const [ttsStatus, setTtsStatus] = useState<TtsStatusSnapshot | null>(null);
   const [autoTtsStatus, setAutoTtsStatus] =
     useState<AutoTtsStatusSnapshot | null>(null);
@@ -122,7 +147,10 @@ export function DebugToolsWindow() {
     setIsSynthesizingTts(true);
     setTtsMessage(null);
     try {
-      const status = await invoke<TtsStatusSnapshot>("synthesize_tts", { text });
+      const status = await invoke<TtsStatusSnapshot>("synthesize_tts", {
+        text,
+        config: buildTtsInvokeConfig(ttsSamplingMode, ttsReferenceAudioPath),
+      });
       setTtsStatus(status);
       setTtsMessage(
         status.hasBufferedAudio
@@ -310,6 +338,29 @@ export function DebugToolsWindow() {
               onChange={(event) => setTtsText(event.target.value)}
               placeholder="Text to synthesize"
             />
+            <div className="grid grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)] gap-2">
+              <select
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                value={ttsSamplingMode}
+                onChange={(event) =>
+                  setTtsSamplingMode(event.target.value as MossSamplingMode)
+                }
+                aria-label="MOSS sampling mode"
+              >
+                <option value="fixed">fixed</option>
+                <option value="greedy">greedy</option>
+              </select>
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="text"
+                value={ttsReferenceAudioPath}
+                onChange={(event) =>
+                  setTtsReferenceAudioPath(event.target.value)
+                }
+                placeholder="Reference WAV path"
+                aria-label="Reference audio path"
+              />
+            </div>
             <div className="grid grid-cols-2 gap-2">
               <button
                 className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"

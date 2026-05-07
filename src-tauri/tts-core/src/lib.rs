@@ -21,11 +21,23 @@ pub type Result<T> = std::result::Result<T, TtsError>;
 pub const PLAYBACK_SAMPLE_RATE_HZ: u32 = 48_000;
 pub const PLAYBACK_CHANNELS: u16 = 2;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TtsConfig {
     pub voice: Option<String>,
     pub speed: Option<f32>,
     pub pitch: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moss: Option<MossTtsConfig>,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MossTtsConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_audio_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
