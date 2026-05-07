@@ -159,6 +159,35 @@ describe("appendAgentEvent", () => {
     expect(appendAgentEvent(current, next)).toEqual([...current, next]);
   });
 
+  it("keeps same-message result chunks merged when they form a complete TTS block", () => {
+    const current = [
+      event({
+        id: "event-1",
+        kind: "result",
+        messageId: "550e8400-e29b-41d4-a716-446655440000",
+        operation: "append",
+        content: "完成 <tts>我",
+      }),
+    ];
+
+    const next = event({
+      id: "event-2",
+      kind: "result",
+      messageId: "550e8400-e29b-41d4-a716-446655440000",
+      operation: "append",
+      content: "处理好了</tts> 正文",
+      createdAt: 2,
+    });
+
+    expect(appendAgentEvent(current, next)).toEqual([
+      {
+        ...current[0],
+        content: "完成 <tts>我处理好了</tts> 正文",
+        createdAt: 2,
+      },
+    ]);
+  });
+
   it("ignores duplicated events with the same id", () => {
     const current = [
       event({

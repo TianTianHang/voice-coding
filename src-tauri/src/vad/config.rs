@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub const HOP_SIZE: usize = 256;
 pub const SAMPLE_RATE: u32 = 16000;
-pub const THRESHOLD: f32 = 0.5;
+pub const THRESHOLD: f32 = 0.6;
 pub const SILENCE_FRAMES: u32 = 30;
 pub const MAX_RECORDING_SECONDS: u32 = 30;
 pub const MAX_RECORDING_SAMPLES: usize = SAMPLE_RATE as usize * MAX_RECORDING_SECONDS as usize;

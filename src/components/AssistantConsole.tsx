@@ -31,7 +31,17 @@ export type AutoTtsStatusSnapshot = {
   latestResultText?: string;
   latestResultKey?: string;
   latestSpokenResultKey?: string;
-  lastStatus: "idle" | "disabled" | "speaking" | "skippedDuplicate" | "stopped" | "failed";
+  lastSkipReason?: string;
+  lastStatus:
+    | "idle"
+    | "disabled"
+    | "speaking"
+    | "skippedDuplicate"
+    | "skippedMissingTag"
+    | "skippedInvalidTag"
+    | "skippedEmptyTag"
+    | "stopped"
+    | "failed";
   tts: TtsStatusSnapshot;
 };
 
@@ -157,6 +167,13 @@ export function autoTtsStatusLabel(status?: AutoTtsStatusSnapshot | null): strin
   }
   if (status.lastStatus === "skippedDuplicate") {
     return "Duplicate skipped";
+  }
+  if (
+    status.lastStatus === "skippedMissingTag" ||
+    status.lastStatus === "skippedInvalidTag" ||
+    status.lastStatus === "skippedEmptyTag"
+  ) {
+    return "Auto speech skipped";
   }
   if (status.lastStatus === "failed") {
     return status.tts.error ? `Auto speech failed: ${status.tts.error}` : "Auto speech failed";

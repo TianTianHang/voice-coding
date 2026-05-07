@@ -325,6 +325,9 @@ export function DebugToolsWindow() {
             </button>
             <p className="text-xs text-slate-600">
               {autoTtsStatusLabel(autoTtsStatus)}
+              {autoTtsStatus?.lastSkipReason
+                ? `: ${autoTtsStatus.lastSkipReason}`
+                : ""}
             </p>
           </div>
 

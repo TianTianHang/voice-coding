@@ -49,6 +49,15 @@ impl VoiceCodingAcpClient {
 
     pub async fn handle_notification(&self, notification: SessionNotification) {
         let event = event_from_notification(notification);
+        if event.kind == AgentEventKind::Result {
+            eprintln!(
+                "[acp] result chunk message_id={:?} event_id={} len={} content={:?}",
+                event.message_id,
+                event.id,
+                event.content.len(),
+                event.content
+            );
+        }
         self.result_tracker.observe(&event);
         emit_agent_event(&self.app, event);
     }

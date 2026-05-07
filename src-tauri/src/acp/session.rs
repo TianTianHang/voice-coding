@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::time::{sleep, Duration};
 
 use super::client::{
     respond_pending_permission, AgentResultTracker, PendingPermissions, VoiceCodingAcpClient,
@@ -16,6 +17,13 @@ use super::client::{
 use super::events::{AgentEvent, AgentStatus};
 use super::profile::AgentProfile;
 use super::transport::spawn_sdk_transport;
+use crate::tts::{agent_tts_readiness, AgentTtsReadiness};
+
+const TTS_OUTPUT_CONTRACT_PROMPT: &str = r#"Voice output contract:
+- When a short spoken response would help, include exactly one <tts>...</tts> block in your final result.
+- Inside <tts>, write only short natural spoken text. Do not include Markdown, code, diffs, logs, file paths, commands, tool output, or long explanations.
+- When no spoken response is needed, omit <tts> entirely.
+- Never output more than one <tts> block, and use exact lowercase <tts> and </tts> tags."#;
 
 struct PromptCommand {
     prompt: String,
@@ -353,11 +361,12 @@ async fn send_prompt_and_wait(
     session: &mut agent_client_protocol::ActiveSession<'static, Agent>,
     prompt: String,
 ) -> Result<(), agent_client_protocol::Error> {
-    session.send_prompt(prompt)?;
+    session.send_prompt(prompt_with_tts_contract(&prompt))?;
     loop {
         match session.read_update().await? {
             agent_client_protocol::SessionMessage::StopReason(_) => {
-                trigger_auto_tts_for_latest_result(app.clone(), result_tracker.latest());
+                eprintln!("[acp] StopReason received; scheduling auto TTS");
+                trigger_auto_tts_for_latest_result(app.clone(), result_tracker.clone());
                 return Ok(());
             }
             agent_client_protocol::SessionMessage::SessionMessage(_) => {}
@@ -366,23 +375,75 @@ async fn send_prompt_and_wait(
     }
 }
 
-fn trigger_auto_tts_for_latest_result(
-    app: AppHandle,
-    result: Option<super::client::TrackedAgentResult>,
-) {
-    let Some(result) = result else {
-        return;
-    };
-    if result.content.trim().is_empty() {
-        return;
-    }
+fn prompt_with_tts_contract(prompt: &str) -> String {
+    format!("{TTS_OUTPUT_CONTRACT_PROMPT}\n\nUser request:\n{prompt}")
+}
 
+fn trigger_auto_tts_for_latest_result(app: AppHandle, result_tracker: AgentResultTracker) {
     tauri::async_runtime::spawn(async move {
+        let Some(result) = wait_for_complete_latest_result(&result_tracker).await else {
+            let runtime = app.state::<crate::tts::TtsRuntime>();
+            runtime.skip_auto_tts_missing_result(
+                Some(&app),
+                "agent turn stopped before any result content was observed",
+            );
+            return;
+        };
+
         let runtime = app.state::<crate::tts::TtsRuntime>();
+        eprintln!(
+            "[auto-tts] latest result selected id={} len={} content={:?}",
+            result.id,
+            result.content.len(),
+            result.content
+        );
+        if result.content.trim().is_empty() {
+            runtime.skip_auto_tts_missing_result(
+                Some(&app),
+                "agent turn stopped with empty result content",
+            );
+            return;
+        }
+
         let _ = runtime
             .speak_agent_result(app.clone(), Some(result.id), result.content)
             .await;
     });
+}
+
+async fn wait_for_complete_latest_result(
+    result_tracker: &AgentResultTracker,
+) -> Option<super::client::TrackedAgentResult> {
+    const ATTEMPTS: usize = 40;
+    const DELAY: Duration = Duration::from_millis(25);
+
+    let mut latest_seen: Option<super::client::TrackedAgentResult> = None;
+    for _ in 0..ATTEMPTS {
+        if let Some(current) = result_tracker.latest() {
+            let readiness = agent_tts_readiness(&current.content);
+            eprintln!(
+                "[auto-tts] wait latest id={} len={} readiness={:?}",
+                current.id,
+                current.content.len(),
+                readiness
+            );
+            latest_seen = Some(current.clone());
+            match readiness {
+                AgentTtsReadiness::Complete => return Some(current),
+                AgentTtsReadiness::Pending => {}
+                AgentTtsReadiness::Invalid(reason) => {
+                    eprintln!("[auto-tts] latest result has invalid TTS tag: {reason}");
+                    return Some(current);
+                }
+            }
+        }
+        sleep(DELAY).await;
+    }
+    eprintln!(
+        "[auto-tts] timed out waiting for complete latest result; using last_seen={}",
+        latest_seen.is_some()
+    );
+    latest_seen
 }
 
 pub fn emit_agent_event(app: &AppHandle, event: AgentEvent) {
@@ -437,6 +498,7 @@ pub async fn respond_agent_confirmation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::acp::events::AgentEventKind;
 
     #[test]
     fn default_status_is_disconnected() {
@@ -452,5 +514,41 @@ mod tests {
             .unwrap_err();
 
         assert!(err.contains("Unknown ACP confirmation id"));
+    }
+
+    #[test]
+    fn prompt_contract_requires_single_short_tts_block() {
+        let prompt = prompt_with_tts_contract("实现这个功能");
+
+        assert!(prompt.contains("exactly one <tts>...</tts> block"));
+        assert!(prompt.contains("short natural spoken text"));
+        assert!(prompt.contains("Do not include Markdown, code, diffs, logs, file paths"));
+        assert!(prompt.contains("omit <tts> entirely"));
+        assert!(prompt.contains("Never output more than one <tts> block"));
+        assert!(prompt.ends_with("User request:\n实现这个功能"));
+    }
+
+    #[tokio::test]
+    async fn waits_for_complete_latest_result_after_stop_reason() {
+        let tracker = AgentResultTracker::default();
+        let tracker_for_task = tracker.clone();
+
+        let waiter = tauri::async_runtime::spawn(async move {
+            wait_for_complete_latest_result(&tracker_for_task).await
+        });
+
+        sleep(Duration::from_millis(40)).await;
+        tracker.observe(
+            &AgentEvent::new(AgentEventKind::Result, None, "<tts>好", None)
+                .with_message_id(Some("message-1".to_string())),
+        );
+        sleep(Duration::from_millis(40)).await;
+        tracker.observe(
+            &AgentEvent::new(AgentEventKind::Result, None, "了</tts>", None)
+                .with_message_id(Some("message-1".to_string())),
+        );
+
+        let result = waiter.await.unwrap();
+        assert_eq!(result.unwrap().content, "<tts>好了</tts>");
     }
 }

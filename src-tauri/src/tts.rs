@@ -43,6 +43,9 @@ pub enum AutoTtsLastStatus {
     Disabled,
     Speaking,
     SkippedDuplicate,
+    SkippedMissingTag,
+    SkippedInvalidTag,
+    SkippedEmptyTag,
     Stopped,
     Failed,
 }
@@ -58,6 +61,8 @@ pub struct AutoTtsStatusSnapshot {
     pub latest_result_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_spoken_result_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_skip_reason: Option<String>,
     pub last_status: AutoTtsLastStatus,
     pub tts: TtsStatusSnapshot,
 }
@@ -69,6 +74,7 @@ struct AutoTtsState {
     latest_result_text: Option<String>,
     latest_result_key: Option<String>,
     latest_spoken_result_key: Option<String>,
+    last_skip_reason: Option<String>,
     last_status: AutoTtsLastStatus,
 }
 
@@ -186,6 +192,7 @@ impl TtsRuntime {
                     latest_result_text: None,
                     latest_result_key: None,
                     latest_spoken_result_key: None,
+                    last_skip_reason: None,
                     last_status: AutoTtsLastStatus::Idle,
                 },
             })),
@@ -217,6 +224,7 @@ impl TtsRuntime {
             latest_result_text: inner.auto.latest_result_text.clone(),
             latest_result_key: inner.auto.latest_result_key.clone(),
             latest_spoken_result_key: inner.auto.latest_spoken_result_key.clone(),
+            last_skip_reason: inner.auto.last_skip_reason.clone(),
             last_status: inner.auto.last_status,
             tts: inner.snapshot.clone(),
         }
@@ -250,6 +258,20 @@ impl TtsRuntime {
         Self::auto_snapshot_locked(&inner)
     }
 
+    pub fn skip_auto_tts_missing_result(
+        &self,
+        app: Option<&AppHandle>,
+        reason: impl Into<String>,
+    ) -> AutoTtsStatusSnapshot {
+        {
+            let mut inner = self.inner.lock();
+            inner.auto.is_playing = false;
+            inner.auto.last_status = AutoTtsLastStatus::SkippedMissingTag;
+            inner.auto.last_skip_reason = Some(reason.into());
+        }
+        self.emit_auto_state(app)
+    }
+
     pub fn set_auto_enabled(
         &self,
         app: Option<&AppHandle>,
@@ -259,9 +281,11 @@ impl TtsRuntime {
             let mut inner = self.inner.lock();
             inner.auto.enabled = enabled;
             inner.auto.last_status = if enabled {
+                inner.auto.last_skip_reason = None;
                 AutoTtsLastStatus::Idle
             } else {
                 inner.cancel_requested = true;
+                inner.auto.last_skip_reason = Some("auto TTS is disabled".to_string());
                 AutoTtsLastStatus::Disabled
             };
         }
@@ -423,7 +447,8 @@ impl TtsRuntime {
         result_id: Option<String>,
         content: String,
     ) -> Result<AutoTtsStatusSnapshot, String> {
-        self.speak_auto_result(app, result_id, content, false).await
+        self.speak_auto_result(app, result_id, content, false, false)
+            .await
     }
 
     pub async fn speak_latest_auto_result(
@@ -439,7 +464,7 @@ impl TtsRuntime {
                 .ok_or_else(|| "No latest Agent result available".to_string())?;
             (text, inner.auto.latest_result_key.clone())
         };
-        self.speak_auto_result(app, key, text, true).await
+        self.speak_auto_result(app, key, text, true, true).await
     }
 
     async fn speak_auto_result(
@@ -448,42 +473,67 @@ impl TtsRuntime {
         result_key_or_id: Option<String>,
         content: String,
         force: bool,
+        content_is_spoken_text: bool,
     ) -> Result<AutoTtsStatusSnapshot, String> {
         let raw_text = content.trim().to_string();
+        eprintln!(
+            "[auto-tts] speak_auto_result force={force} content_is_spoken_text={content_is_spoken_text} raw_len={}",
+            raw_text.len()
+        );
         if raw_text.is_empty() {
+            let mut inner = self.inner.lock();
+            inner.auto.last_status = AutoTtsLastStatus::SkippedMissingTag;
+            inner.auto.last_skip_reason = Some("agent result is empty".to_string());
+            drop(inner);
             return Ok(self.emit_auto_state(Some(&app)));
         }
-        let speakable_text = prepare_agent_result_for_speech(&raw_text);
-        if speakable_text.is_empty() {
-            return Ok(self.emit_auto_state(Some(&app)));
-        }
+        let speakable_text = match auto_tts_spoken_text(&raw_text, content_is_spoken_text) {
+            Ok(text) => text,
+            Err(reason) => {
+                eprintln!("[auto-tts] skip before synth: {reason}");
+                let mut inner = self.inner.lock();
+                inner.auto.last_status = reason.status();
+                inner.auto.last_skip_reason = Some(reason.to_string());
+                drop(inner);
+                return Ok(self.emit_auto_state(Some(&app)));
+            }
+        };
 
         let key = if force {
-            result_key_or_id.unwrap_or_else(|| auto_tts_result_key(None, &raw_text))
+            result_key_or_id.unwrap_or_else(|| auto_tts_result_key(None, &speakable_text))
         } else {
-            auto_tts_result_key(result_key_or_id.as_deref(), &raw_text)
+            auto_tts_result_key(result_key_or_id.as_deref(), &speakable_text)
         };
         {
             let mut inner = self.inner.lock();
-            inner.auto.latest_result_text = Some(raw_text.clone());
+            inner.auto.latest_result_text = Some(speakable_text.clone());
             inner.auto.latest_result_key = Some(key.clone());
 
             if !inner.auto.enabled && !force {
+                eprintln!("[auto-tts] skip disabled key={key}");
                 inner.auto.last_status = AutoTtsLastStatus::Disabled;
+                inner.auto.last_skip_reason = Some("auto TTS is disabled".to_string());
                 drop(inner);
                 return Ok(self.emit_auto_state(Some(&app)));
             }
 
             if !force && inner.auto.latest_spoken_result_key.as_deref() == Some(key.as_str()) {
+                eprintln!("[auto-tts] skip duplicate key={key}");
                 inner.auto.last_status = AutoTtsLastStatus::SkippedDuplicate;
+                inner.auto.last_skip_reason =
+                    Some("extracted TTS text already matches latest spoken result".to_string());
                 drop(inner);
                 return Ok(self.emit_auto_state(Some(&app)));
             }
 
             inner.auto.is_playing = true;
             inner.auto.last_status = AutoTtsLastStatus::Speaking;
-            inner.auto.latest_spoken_result_key = Some(key);
+            inner.auto.last_skip_reason = None;
         }
+        eprintln!(
+            "[auto-tts] synth/play start key={key} spoken_len={}",
+            speakable_text.len()
+        );
         self.emit_auto_state(Some(&app));
 
         let result = async {
@@ -501,11 +551,18 @@ impl TtsRuntime {
         {
             let mut inner = self.inner.lock();
             inner.auto.is_playing = false;
+            if result.is_ok() && !inner.cancel_requested {
+                inner.auto.latest_spoken_result_key = Some(key);
+            }
             inner.auto.last_status = match &result {
                 Ok(_) if inner.cancel_requested => AutoTtsLastStatus::Stopped,
                 Ok(_) => AutoTtsLastStatus::Idle,
                 Err(_) => AutoTtsLastStatus::Failed,
             };
+        }
+        match &result {
+            Ok(_) => eprintln!("[auto-tts] synth/play finished"),
+            Err(err) => eprintln!("[auto-tts] synth/play failed: {err}"),
         }
         let snapshot = self.emit_auto_state(Some(&app));
         result.map(|_| snapshot).inspect_err(|err| {
@@ -523,93 +580,142 @@ pub(crate) fn auto_tts_result_key(result_id: Option<&str>, content: &str) -> Str
     }
 }
 
-pub(crate) fn prepare_agent_result_for_speech(content: &str) -> String {
-    let mut prepared = Vec::new();
-    let mut in_fence = false;
-    let mut skipped_fence = false;
-    let mut skipped_technical_block = false;
+fn auto_tts_spoken_text(
+    content: &str,
+    content_is_spoken_text: bool,
+) -> Result<String, AgentTtsTagError> {
+    if content_is_spoken_text {
+        Ok(content.trim().to_string())
+    } else {
+        extract_agent_tts_text(content)
+    }
+}
 
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.starts_with("```") || line.starts_with("~~~") {
-            if !in_fence {
-                skipped_fence = true;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTtsTagError {
+    MissingTag,
+    MultipleTags,
+    IncompleteTag,
+    EmptyTag,
+    NestedTag,
+    CaseMismatch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTtsReadiness {
+    Complete,
+    Pending,
+    Invalid(AgentTtsTagError),
+}
+
+pub(crate) fn agent_tts_readiness(content: &str) -> AgentTtsReadiness {
+    match extract_agent_tts_text(content) {
+        Ok(_) => AgentTtsReadiness::Complete,
+        Err(AgentTtsTagError::IncompleteTag) => AgentTtsReadiness::Pending,
+        Err(reason) => AgentTtsReadiness::Invalid(reason),
+    }
+}
+
+impl AgentTtsTagError {
+    fn status(self) -> AutoTtsLastStatus {
+        match self {
+            AgentTtsTagError::MissingTag => AutoTtsLastStatus::SkippedMissingTag,
+            AgentTtsTagError::EmptyTag => AutoTtsLastStatus::SkippedEmptyTag,
+            AgentTtsTagError::MultipleTags
+            | AgentTtsTagError::IncompleteTag
+            | AgentTtsTagError::NestedTag
+            | AgentTtsTagError::CaseMismatch => AutoTtsLastStatus::SkippedInvalidTag,
+        }
+    }
+}
+
+impl std::fmt::Display for AgentTtsTagError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let reason = match self {
+            AgentTtsTagError::MissingTag => "agent result is missing a <tts>...</tts> block",
+            AgentTtsTagError::MultipleTags => "agent result contains multiple <tts> blocks",
+            AgentTtsTagError::IncompleteTag => "agent result contains an incomplete <tts> block",
+            AgentTtsTagError::EmptyTag => "agent result contains an empty <tts> block",
+            AgentTtsTagError::NestedTag => "agent result contains nested <tts> tags",
+            AgentTtsTagError::CaseMismatch => {
+                "agent result contains case-mismatched TTS tags; use exact lowercase <tts>"
             }
-            in_fence = !in_fence;
-            continue;
-        }
-        if in_fence {
-            continue;
-        }
-        if line.is_empty() {
-            prepared.push(String::new());
-            continue;
-        }
-        if is_diff_line(line)
-            || is_terminal_log_line(line)
-            || is_command_heavy_line(line)
-            || is_long_json_line(line)
-        {
-            skipped_technical_block = true;
-            continue;
-        }
-        prepared.push(line.to_string());
-    }
-
-    let mut text = prepared.join("\n");
-    if skipped_fence || skipped_technical_block {
-        let label = if skipped_fence {
-            "包含一段代码或技术输出。"
-        } else {
-            "省略一段技术输出。"
         };
-        if text.trim().is_empty() {
-            text = label.to_string();
-        } else {
-            text.push('\n');
-            text.push_str(label);
-        }
+        f.write_str(reason)
     }
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn is_diff_line(line: &str) -> bool {
-    line.starts_with("diff --git")
-        || line.starts_with("@@")
-        || line.starts_with("+++ ")
-        || line.starts_with("--- ")
-        || line.starts_with("+ ")
+pub(crate) fn extract_agent_tts_text(content: &str) -> Result<String, AgentTtsTagError> {
+    if has_case_mismatched_tts_tag(content) {
+        return Err(AgentTtsTagError::CaseMismatch);
+    }
+
+    let mut matches = Vec::new();
+    let mut search_from = 0;
+    while let Some(relative_start) = content[search_from..].find("<tts>") {
+        let start = search_from + relative_start;
+        let inner_start = start + "<tts>".len();
+        let Some(relative_end) = content[inner_start..].find("</tts>") else {
+            return Err(AgentTtsTagError::IncompleteTag);
+        };
+        let end = inner_start + relative_end;
+        let block_end = end + "</tts>".len();
+        matches.push((inner_start, end, block_end));
+        search_from = block_end;
+    }
+
+    if matches.is_empty() {
+        if content.contains("</tts>") {
+            return Err(AgentTtsTagError::IncompleteTag);
+        }
+        return Err(AgentTtsTagError::MissingTag);
+    }
+
+    if matches.len() > 1 {
+        return Err(AgentTtsTagError::MultipleTags);
+    }
+
+    let (inner_start, inner_end, block_end) = matches[0];
+    let inner = &content[inner_start..inner_end];
+    if inner.contains("<tts>") || inner.contains("</tts>") {
+        return Err(AgentTtsTagError::NestedTag);
+    }
+
+    if content[block_end..].contains("</tts>") {
+        return Err(AgentTtsTagError::IncompleteTag);
+    }
+
+    let trimmed = inner.trim();
+    if trimmed.is_empty() {
+        return Err(AgentTtsTagError::EmptyTag);
+    }
+
+    Ok(trimmed.to_string())
 }
 
-fn is_terminal_log_line(line: &str) -> bool {
-    line.starts_with('$')
-        || line.starts_with('>')
-        || line.starts_with("error:")
-        || line.starts_with("warning:")
-        || line.contains("Finished `")
-        || line.contains("Compiling ")
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn strip_agent_tts_blocks(content: &str) -> String {
+    let mut stripped = String::with_capacity(content.len());
+    let mut search_from = 0;
+    while let Some(relative_start) = content[search_from..].find("<tts>") {
+        let start = search_from + relative_start;
+        let inner_start = start + "<tts>".len();
+        let Some(relative_end) = content[inner_start..].find("</tts>") else {
+            break;
+        };
+        let end = inner_start + relative_end + "</tts>".len();
+        stripped.push_str(&content[search_from..start]);
+        search_from = end;
+    }
+    stripped.push_str(&content[search_from..]);
+    stripped.trim().to_string()
 }
 
-fn is_command_heavy_line(line: &str) -> bool {
-    let command_markers = [
-        "nix develop",
-        "cargo test",
-        "pnpm ",
-        "npm ",
-        "git ",
-        "python ",
-    ];
-    let marker_count = command_markers
-        .iter()
-        .filter(|marker| line.contains(*marker))
-        .count();
-    marker_count >= 2 || (marker_count == 1 && line.len() > 100)
-}
-
-fn is_long_json_line(line: &str) -> bool {
-    line.len() > 120
-        && ((line.starts_with('{') && line.ends_with('}'))
-            || (line.starts_with('[') && line.ends_with(']')))
+fn has_case_mismatched_tts_tag(content: &str) -> bool {
+    let lower = content.to_lowercase();
+    let lowercase_count = content.matches("<tts>").count() + content.matches("</tts>").count();
+    let any_case_count = lower.matches("<tts>").count() + lower.matches("</tts>").count();
+    any_case_count > lowercase_count
 }
 
 #[cfg(feature = "tts-moss-onnx")]
@@ -929,6 +1035,7 @@ mod tests {
             inner.auto.latest_result_text = Some("Done".to_string());
             inner.auto.latest_result_key = Some("result-1:Done".to_string());
             inner.auto.latest_spoken_result_key = Some("result-1:Done".to_string());
+            inner.auto.last_skip_reason = Some("duplicate".to_string());
             inner.auto.last_status = AutoTtsLastStatus::SkippedDuplicate;
         }
 
@@ -939,46 +1046,109 @@ mod tests {
             status.latest_spoken_result_key.as_deref(),
             Some("result-1:Done")
         );
+        assert_eq!(status.last_skip_reason.as_deref(), Some("duplicate"));
         assert_eq!(status.last_status, AutoTtsLastStatus::SkippedDuplicate);
     }
 
     #[test]
-    fn prepares_agent_result_for_speech_without_mutating_raw_key_source() {
-        let raw = r#"已完成：
-- 修改 `src-tauri/tts-moss/src/text.rs`
-- 运行 `nix develop -c cargo test -p tts-moss`
+    fn extracts_valid_single_tts_tag_and_strips_display_blocks() {
+        let raw = "完成了。\n<tts>  我已经处理好了。  </tts>\n- 修改了测试";
 
-```rust
-fn main() {}
-```
-
-保留解释文字。"#;
-
-        let prepared = prepare_agent_result_for_speech(raw);
-
-        assert!(prepared.contains("已完成"));
-        assert!(prepared.contains("保留解释文字"));
-        assert!(prepared.contains("包含一段代码或技术输出"));
-        assert!(!prepared.contains("fn main"));
         assert_eq!(
-            auto_tts_result_key(Some("result-1"), raw),
-            format!(
-                "result-1:{}",
-                raw.split_whitespace().collect::<Vec<_>>().join(" ")
-            )
+            extract_agent_tts_text(raw).as_deref(),
+            Ok("我已经处理好了。")
+        );
+        assert_eq!(strip_agent_tts_blocks(raw), "完成了。\n\n- 修改了测试");
+    }
+
+    #[test]
+    fn extracts_missing_tag_as_skip() {
+        assert_eq!(
+            extract_agent_tts_text("没有口播协议"),
+            Err(AgentTtsTagError::MissingTag)
         );
     }
 
     #[test]
-    fn prepares_agent_result_by_skipping_logs_json_and_command_heavy_lines() {
-        let raw = r#"总结如下：
-$ cargo test -p tts-moss
-{"very":"long","payload":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
-warning: noisy terminal output
-自然语言结论。"#;
+    fn extracts_multiple_tags_as_invalid() {
+        let raw = "<tts>第一句</tts>\n正文\n<tts>第二句</tts>";
 
-        let prepared = prepare_agent_result_for_speech(raw);
+        assert_eq!(
+            extract_agent_tts_text(raw),
+            Err(AgentTtsTagError::MultipleTags)
+        );
+        assert_eq!(strip_agent_tts_blocks(raw), "正文");
+    }
 
-        assert_eq!(prepared, "总结如下： 自然语言结论。 省略一段技术输出。");
+    #[test]
+    fn extracts_incomplete_tags_as_invalid() {
+        assert_eq!(
+            extract_agent_tts_text("正文 <tts>没结束"),
+            Err(AgentTtsTagError::IncompleteTag)
+        );
+        assert_eq!(
+            extract_agent_tts_text("正文 </tts>"),
+            Err(AgentTtsTagError::IncompleteTag)
+        );
+        assert_eq!(
+            strip_agent_tts_blocks("正文 <tts>没结束"),
+            "正文 <tts>没结束"
+        );
+    }
+
+    #[test]
+    fn extracts_empty_tag_as_empty_skip() {
+        assert_eq!(
+            extract_agent_tts_text("正文 <tts> \n\t </tts>"),
+            Err(AgentTtsTagError::EmptyTag)
+        );
+    }
+
+    #[test]
+    fn extracts_nested_tags_as_invalid() {
+        assert_eq!(
+            extract_agent_tts_text("<tts>外层 <tts>内层</tts></tts>"),
+            Err(AgentTtsTagError::NestedTag)
+        );
+    }
+
+    #[test]
+    fn extracts_case_mismatched_tags_as_invalid() {
+        assert_eq!(
+            extract_agent_tts_text("<TTS>不要播</TTS>"),
+            Err(AgentTtsTagError::CaseMismatch)
+        );
+        assert_eq!(
+            extract_agent_tts_text("<tts>不要播</TTS>"),
+            Err(AgentTtsTagError::CaseMismatch)
+        );
+    }
+
+    #[test]
+    fn auto_tts_result_key_uses_extracted_spoken_text() {
+        let raw = "展示文本 <tts>  只播这句  </tts>";
+        let spoken = extract_agent_tts_text(raw).unwrap();
+
+        assert_eq!(
+            auto_tts_result_key(Some("result-1"), &spoken),
+            "result-1:只播这句"
+        );
+    }
+
+    #[test]
+    fn latest_auto_result_replay_uses_stored_spoken_text_without_requiring_tags() {
+        let speakable_text = auto_tts_spoken_text("只播这句", true).unwrap();
+        let replay_key = auto_tts_result_key(Some("result-1"), &speakable_text);
+
+        assert_eq!(speakable_text, "只播这句");
+        assert_eq!(replay_key, "result-1:只播这句");
+    }
+
+    #[test]
+    fn fresh_agent_result_still_requires_tts_tags() {
+        assert_eq!(
+            auto_tts_spoken_text("只播这句", false),
+            Err(AgentTtsTagError::MissingTag)
+        );
     }
 }

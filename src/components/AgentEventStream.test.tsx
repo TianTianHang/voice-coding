@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { AgentEventStream } from "./AgentEventStream";
+import { AgentEventStream, stripTtsControlBlocks } from "./AgentEventStream";
 import type { AgentEvent } from "../hooks/useAgentEvents";
 
 function event(overrides: Partial<AgentEvent>): AgentEvent {
@@ -40,6 +40,65 @@ describe("AgentEventStream", () => {
     expect(markup).toContain("Tool");
     expect(markup).toContain("failed");
     expect(markup).toContain("src/App.tsx:12");
+  });
+
+  it("hides a single complete TTS control block in result content", () => {
+    const markup = renderToStaticMarkup(
+      <AgentEventStream
+        events={[
+          event({
+            kind: "result",
+            content: "完成了。\n<tts>我处理好了。</tts>\n改动见上方。",
+          }),
+        ]}
+        onConfirm={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain("完成了。");
+    expect(markup).toContain("改动见上方。");
+    expect(markup).not.toContain("我处理好了。");
+    expect(markup).not.toContain("&lt;tts&gt;");
+  });
+
+  it("hides multiple complete TTS control blocks in result content", () => {
+    const markup = renderToStaticMarkup(
+      <AgentEventStream
+        events={[
+          event({
+            kind: "result",
+            content: "A <tts>one</tts> B <tts>two</tts> C",
+          }),
+        ]}
+        onConfirm={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain("A  B  C");
+    expect(markup).not.toContain("one");
+    expect(markup).not.toContain("two");
+  });
+
+  it("keeps readable text visible when a TTS tag is incomplete", () => {
+    const markup = renderToStaticMarkup(
+      <AgentEventStream
+        events={[
+          event({
+            kind: "result",
+            content: "正文 <tts>未完成",
+          }),
+        ]}
+        onConfirm={async () => {}}
+      />,
+    );
+
+    expect(markup).toContain("正文 &lt;tts&gt;未完成");
+  });
+
+  it("strips TTS blocks after stream chunks have merged", () => {
+    expect(stripTtsControlBlocks("前缀 <tts>准备好了</tts> 后缀")).toBe(
+      "前缀  后缀",
+    );
   });
 
   it("renders diff and terminal content without blank blocks", () => {

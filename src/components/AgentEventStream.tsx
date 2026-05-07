@@ -97,7 +97,9 @@ export function AgentEventStream({
             {latestEvent && (
               <p className="mt-1 max-h-10 overflow-hidden text-sm leading-5 text-slate-500">
                 Latest: {eventLabels[latestEvent.kind]}{" "}
-                {latestEvent.title ? `- ${latestEvent.title}` : latestEvent.content}
+                {latestEvent.title
+                  ? `- ${latestEvent.title}`
+                  : displayAgentEventContent(latestEvent)}
               </p>
             )}
           </div>
@@ -196,7 +198,9 @@ export function AgentEventStream({
           {event.kind === "tool" && event.tool ? (
             <ToolEvent event={event} />
           ) : (
-            <div className="whitespace-pre-wrap leading-[1.45]">{event.content}</div>
+            <div className="whitespace-pre-wrap leading-[1.45]">
+              {displayAgentEventContent(event)}
+            </div>
           )}
 
           {event.diff && <DiffBlock diff={event.diff} />}
@@ -243,6 +247,38 @@ export function AgentEventStream({
       ))}
     </section>
   );
+}
+
+export function stripTtsControlBlocks(content: string): string {
+  let stripped = "";
+  let searchFrom = 0;
+
+  while (searchFrom < content.length) {
+    const start = content.indexOf("<tts>", searchFrom);
+    if (start === -1) {
+      stripped += content.slice(searchFrom);
+      break;
+    }
+
+    const innerStart = start + "<tts>".length;
+    const end = content.indexOf("</tts>", innerStart);
+    if (end === -1) {
+      stripped += content.slice(searchFrom);
+      break;
+    }
+
+    stripped += content.slice(searchFrom, start);
+    searchFrom = end + "</tts>".length;
+  }
+
+  return stripped.trim();
+}
+
+function displayAgentEventContent(event: AgentEvent): string {
+  if (event.kind !== "result") {
+    return event.content;
+  }
+  return stripTtsControlBlocks(event.content);
 }
 
 function ToolEvent({ event }: { event: AgentEvent }) {
