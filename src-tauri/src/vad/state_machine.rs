@@ -155,9 +155,11 @@ mod tests {
 
         assert_eq!(sm.get_state(), VadState::Listening);
         let events: Vec<VadEvent> = rx.try_iter().collect();
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, VadEvent::StateChanged(VadState::Listening))));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, VadEvent::StateChanged(VadState::Listening)))
+        );
     }
 
     #[test]
@@ -173,12 +175,16 @@ mod tests {
 
         assert_eq!(sm.get_state(), VadState::Listening);
         let events: Vec<VadEvent> = rx.try_iter().collect();
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, VadEvent::SpeechDetected(_))));
-        assert!(events
-            .iter()
-            .any(|event| matches!(event, VadEvent::StateChanged(VadState::Listening))));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, VadEvent::SpeechDetected(_)))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, VadEvent::StateChanged(VadState::Listening)))
+        );
     }
 
     #[test]

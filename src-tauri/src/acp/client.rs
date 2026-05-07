@@ -1,3 +1,4 @@
+use agent_client_protocol::Responder;
 use agent_client_protocol::schema::{
     AvailableCommandInput, ConfigOptionUpdate, ContentBlock, ContentChunk, CurrentModeUpdate,
     EmbeddedResourceResource, PermissionOption, PermissionOptionKind, Plan,
@@ -5,7 +6,6 @@ use agent_client_protocol::schema::{
     SelectedPermissionOutcome, SessionInfoUpdate, SessionNotification, SessionUpdate, ToolCall,
     ToolCallContent, ToolCallUpdate, ToolCallUpdateFields,
 };
-use agent_client_protocol::Responder;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,15 +31,26 @@ pub struct PendingPermission {
 pub struct VoiceCodingAcpClient {
     app: AppHandle,
     pending: PendingPermissions,
+    result_tracker: AgentResultTracker,
 }
 
 impl VoiceCodingAcpClient {
-    pub fn new(app: AppHandle, pending: PendingPermissions) -> Self {
-        Self { app, pending }
+    pub fn new(
+        app: AppHandle,
+        pending: PendingPermissions,
+        result_tracker: AgentResultTracker,
+    ) -> Self {
+        Self {
+            app,
+            pending,
+            result_tracker,
+        }
     }
 
     pub async fn handle_notification(&self, notification: SessionNotification) {
-        emit_agent_event(&self.app, event_from_notification(notification));
+        let event = event_from_notification(notification);
+        self.result_tracker.observe(&event);
+        emit_agent_event(&self.app, event);
     }
 
     pub fn handle_permission_request(
@@ -69,6 +80,59 @@ impl VoiceCodingAcpClient {
         emit_agent_event(&self.app, event);
         Ok(())
     }
+}
+
+#[derive(Clone, Default)]
+pub struct AgentResultTracker {
+    latest: Arc<Mutex<Option<TrackedAgentResult>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrackedAgentResult {
+    pub id: String,
+    pub content: String,
+}
+
+impl AgentResultTracker {
+    pub fn observe(&self, event: &AgentEvent) {
+        if event.kind != AgentEventKind::Result {
+            return;
+        }
+
+        let result_id = event.message_id.clone().unwrap_or_else(|| event.id.clone());
+        let mut latest = self.latest.lock();
+        match latest.as_mut() {
+            Some(current) if current.id == result_id => {
+                current.content = merge_append_text(&current.content, &event.content);
+            }
+            _ => {
+                *latest = Some(TrackedAgentResult {
+                    id: result_id,
+                    content: event.content.clone(),
+                });
+            }
+        }
+    }
+
+    pub fn latest(&self) -> Option<TrackedAgentResult> {
+        self.latest.lock().clone()
+    }
+}
+
+fn merge_append_text(current: &str, next: &str) -> String {
+    if current.is_empty() {
+        return next.to_string();
+    }
+    if next.is_empty() {
+        return current.to_string();
+    }
+    if next.starts_with(current) {
+        return next.to_string();
+    }
+    if current.ends_with(next) {
+        return current.to_string();
+    }
+    format!("{current}{next}")
 }
 
 pub fn respond_pending_permission(
@@ -591,6 +655,33 @@ mod tests {
     }
 
     #[test]
+    fn result_tracker_only_records_result_events_and_merges_chunks() {
+        let tracker = AgentResultTracker::default();
+        tracker.observe(&AgentEvent::status("Working"));
+        assert!(tracker.latest().is_none());
+
+        let first = AgentEvent::new(AgentEventKind::Result, None, "hel", None)
+            .with_message_id(Some("message-1".to_string()))
+            .with_operation(AgentEventOperation::Append);
+        tracker.observe(&first);
+        let second = AgentEvent::new(AgentEventKind::Result, None, "lo", None)
+            .with_message_id(Some("message-1".to_string()))
+            .with_operation(AgentEventOperation::Append);
+        tracker.observe(&second);
+
+        assert_eq!(
+            tracker.latest(),
+            Some(TrackedAgentResult {
+                id: "message-1".to_string(),
+                content: "hello".to_string(),
+            })
+        );
+
+        tracker.observe(&second);
+        assert_eq!(tracker.latest().unwrap().content, "hello");
+    }
+
+    #[test]
     fn maps_tool_notification() {
         let value = serde_json::json!({
             "sessionId": "s1",
@@ -606,7 +697,10 @@ mod tests {
         assert_eq!(event.kind, AgentEventKind::Tool);
         assert_eq!(event.tool_call_id.as_deref(), Some("t1"));
         assert_eq!(event.operation, Some(AgentEventOperation::Create));
-        assert_eq!(event.tool.as_ref().unwrap().title.as_deref(), Some("Run tests"));
+        assert_eq!(
+            event.tool.as_ref().unwrap().title.as_deref(),
+            Some("Run tests")
+        );
     }
 
     #[test]
@@ -624,10 +718,16 @@ mod tests {
 
         assert_eq!(user.kind, AgentEventKind::Status);
         assert_eq!(user.operation, Some(AgentEventOperation::Append));
-        assert_eq!(user.message_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440001"));
+        assert_eq!(
+            user.message_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440001")
+        );
         assert_eq!(thought.kind, AgentEventKind::Thinking);
         assert_eq!(thought.operation, Some(AgentEventOperation::Append));
-        assert_eq!(thought.message_id.as_deref(), Some("550e8400-e29b-41d4-a716-446655440002"));
+        assert_eq!(
+            thought.message_id.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440002")
+        );
     }
 
     #[test]
@@ -719,15 +819,21 @@ mod tests {
             "create_plan"
         );
         assert_eq!(
-            mode.session_state.as_ref().unwrap().current_mode_id.as_deref(),
+            mode.session_state
+                .as_ref()
+                .unwrap()
+                .current_mode_id
+                .as_deref(),
             Some("build")
         );
-        assert!(config
-            .session_state
-            .as_ref()
-            .unwrap()
-            .config_options
-            .is_empty());
+        assert!(
+            config
+                .session_state
+                .as_ref()
+                .unwrap()
+                .config_options
+                .is_empty()
+        );
         assert_eq!(
             info.session_state
                 .as_ref()

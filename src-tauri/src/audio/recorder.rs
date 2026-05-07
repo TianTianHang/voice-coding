@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::{Receiver, Sender, unbounded};
 use parking_lot::Mutex;
 
 use crate::vad::{VadConfig, VadEngine, VadEvent, VadStateMachine};

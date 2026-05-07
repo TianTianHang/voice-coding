@@ -1,11 +1,11 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::audio::AudioRecorder;
-use crate::vad::{VadConfig, VadState, SAMPLE_RATE, THRESHOLD};
+use crate::vad::{SAMPLE_RATE, THRESHOLD, VadConfig, VadState};
 use stt_core::{AudioInput, SttEngine};
 
 pub struct VadRecorderState {
@@ -329,7 +329,9 @@ pub async fn start_listening(
 }
 
 #[tauri::command]
-pub fn get_vad_config(state: tauri::State<'_, VadRuntimeConfigState>) -> Result<VadRuntimeConfig, String> {
+pub fn get_vad_config(
+    state: tauri::State<'_, VadRuntimeConfigState>,
+) -> Result<VadRuntimeConfig, String> {
     Ok(state.get())
 }
 
@@ -428,6 +430,9 @@ mod tests {
     fn set_vad_config_rejects_out_of_range_threshold() {
         let result = validate_threshold(1.2);
         assert!(result.is_err());
-        assert_eq!(result.err().as_deref(), Some("threshold must be between 0.0 and 1.0"));
+        assert_eq!(
+            result.err().as_deref(),
+            Some("threshold must be between 0.0 and 1.0")
+        );
     }
 }

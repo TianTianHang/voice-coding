@@ -23,9 +23,11 @@ dist-ssr
 *.sln
 *.sw?
 .opencode
+.claude
 
-# STT model files (~2.5GB)
-models/
+# model files
+models/asr
+models/tts
 
 test_audio
 test_outputs/

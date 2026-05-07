@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use parking_lot::Mutex;
-use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
+use tts_core::{AudioBuffer, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ, PcmData};
 
 #[derive(Debug)]
 pub enum AudioOutputError {

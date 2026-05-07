@@ -6,11 +6,13 @@ use agent_client_protocol::schema::{
 use agent_client_protocol::{Agent, Client, ConnectionTo, JsonRpcResponse, Responder};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::process::Child;
-use tokio::sync::{mpsc, oneshot, Mutex as AsyncMutex};
+use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
 
-use super::client::{respond_pending_permission, PendingPermissions, VoiceCodingAcpClient};
+use super::client::{
+    AgentResultTracker, PendingPermissions, VoiceCodingAcpClient, respond_pending_permission,
+};
 use super::events::{AgentEvent, AgentStatus};
 use super::profile::AgentProfile;
 use super::transport::spawn_sdk_transport;
@@ -35,6 +37,7 @@ struct ActiveAgent {
 pub struct AcpRuntime {
     active: Arc<Mutex<Option<ActiveAgent>>>,
     pending_permissions: PendingPermissions,
+    result_tracker: AgentResultTracker,
 }
 
 impl AcpRuntime {
@@ -72,6 +75,7 @@ impl AcpRuntime {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let active = self.active.clone();
         let pending_permissions = self.pending_permissions.clone();
+        let result_tracker = self.result_tracker.clone();
         let profile_for_task = profile.clone();
         let app_for_task = app.clone();
         let child_for_task = child.clone();
@@ -82,6 +86,7 @@ impl AcpRuntime {
                 profile_for_task.clone(),
                 transport,
                 pending_permissions,
+                result_tracker,
                 ready_tx,
                 shutdown_rx,
             )
@@ -181,10 +186,12 @@ async fn run_sdk_connection(
     profile: AgentProfile,
     transport: super::transport::SdkTransport,
     pending_permissions: PendingPermissions,
+    result_tracker: AgentResultTracker,
     ready_tx: ReadySender,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    let client = VoiceCodingAcpClient::new(app.clone(), pending_permissions);
+    let client =
+        VoiceCodingAcpClient::new(app.clone(), pending_permissions, result_tracker.clone());
     let notification_client = client.clone();
     let permission_client = client.clone();
     let unsupported_app = app.clone();
@@ -294,7 +301,7 @@ async fn run_sdk_connection(
                     let _ = tx.send(Ok((session_id, prompt_tx)));
                 }
 
-                run_prompt_worker(session, prompt_rx, shutdown_rx).await
+                run_prompt_worker(app, result_tracker, session, prompt_rx, shutdown_rx).await
             }
         })
         .await;
@@ -320,6 +327,8 @@ fn reject_unsupported<T: JsonRpcResponse>(
 }
 
 async fn run_prompt_worker(
+    app: AppHandle,
+    result_tracker: AgentResultTracker,
     mut session: agent_client_protocol::ActiveSession<'static, Agent>,
     mut prompt_rx: mpsc::UnboundedReceiver<PromptCommand>,
     mut shutdown_rx: oneshot::Receiver<()>,
@@ -331,7 +340,7 @@ async fn run_prompt_worker(
                 let Some(command) = command else {
                     return Ok(());
                 };
-                let result = send_prompt_and_wait(&mut session, command.prompt).await;
+                let result = send_prompt_and_wait(&app, &result_tracker, &mut session, command.prompt).await;
                 let _ = command.result.send(result.map_err(|e| e.to_string()));
             }
         }
@@ -339,17 +348,41 @@ async fn run_prompt_worker(
 }
 
 async fn send_prompt_and_wait(
+    app: &AppHandle,
+    result_tracker: &AgentResultTracker,
     session: &mut agent_client_protocol::ActiveSession<'static, Agent>,
     prompt: String,
 ) -> Result<(), agent_client_protocol::Error> {
     session.send_prompt(prompt)?;
     loop {
         match session.read_update().await? {
-            agent_client_protocol::SessionMessage::StopReason(_) => return Ok(()),
+            agent_client_protocol::SessionMessage::StopReason(_) => {
+                trigger_auto_tts_for_latest_result(app.clone(), result_tracker.latest());
+                return Ok(());
+            }
             agent_client_protocol::SessionMessage::SessionMessage(_) => {}
             _ => {}
         }
     }
+}
+
+fn trigger_auto_tts_for_latest_result(
+    app: AppHandle,
+    result: Option<super::client::TrackedAgentResult>,
+) {
+    let Some(result) = result else {
+        return;
+    };
+    if result.content.trim().is_empty() {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        let runtime = app.state::<crate::tts::TtsRuntime>();
+        let _ = runtime
+            .speak_agent_result(app.clone(), Some(result.id), result.content)
+            .await;
+    });
 }
 
 pub fn emit_agent_event(app: &AppHandle, event: AgentEvent) {

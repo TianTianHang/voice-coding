@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  autoTtsStatusLabel,
   deriveVoiceExperienceState,
   shouldExpandTimelineForEvent,
 } from "./AssistantConsole";
@@ -111,5 +112,46 @@ describe("shouldExpandTimelineForEvent", () => {
         event({ kind: "result", content: "Done" }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("autoTtsStatusLabel", () => {
+  const base = {
+    enabled: true,
+    isPlaying: false,
+    latestResultText: "Done",
+    latestResultKey: "result-1:Done",
+    latestSpokenResultKey: "result-1:Done",
+    lastStatus: "idle" as const,
+    tts: {
+      state: "idle" as const,
+      engineName: "mock-tts",
+      model: {
+        kind: "tts" as const,
+        modelId: "moss-tts-nano-100m-onnx",
+        engineName: "moss-onnx-tts",
+        packageDir: "",
+        modelDir: "",
+        source: "devFallback" as const,
+        legacyLayout: false,
+        missingFiles: [],
+      },
+      hasBufferedAudio: true,
+    },
+  };
+
+  it("distinguishes disabled, idle, speaking, duplicate, and failed states", () => {
+    expect(autoTtsStatusLabel(null)).toBe("Auto speech unknown");
+    expect(autoTtsStatusLabel({ ...base, enabled: false, lastStatus: "disabled" })).toBe("Auto speech off");
+    expect(autoTtsStatusLabel(base)).toBe("Auto speech on");
+    expect(autoTtsStatusLabel({ ...base, isPlaying: true, lastStatus: "speaking" })).toBe("Speaking reply");
+    expect(autoTtsStatusLabel({ ...base, lastStatus: "skippedDuplicate" })).toBe("Duplicate skipped");
+    expect(
+      autoTtsStatusLabel({
+        ...base,
+        lastStatus: "failed",
+        tts: { ...base.tts, state: "failed", error: "boom" },
+      }),
+    ).toBe("Auto speech failed: boom");
   });
 });

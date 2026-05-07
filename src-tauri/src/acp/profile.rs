@@ -63,7 +63,7 @@ impl AgentConfigFile {
             Some(_) => return Err("ACP agent defaultProfile must not be empty".into()),
             None if self.profiles.len() == 1 => None,
             None => {
-                return Err("ACP agent config has multiple profiles but no defaultProfile".into())
+                return Err("ACP agent config has multiple profiles but no defaultProfile".into());
             }
         };
 

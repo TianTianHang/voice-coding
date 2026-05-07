@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useBackendVAD, type VADState } from "../hooks/useBackendVAD";
 import {
   asrStatusLabel,
@@ -25,6 +26,16 @@ type TtsStatusSnapshot = {
   model: ModelPathSnapshot;
   error?: string;
   hasBufferedAudio: boolean;
+};
+
+type AutoTtsStatusSnapshot = {
+  enabled: boolean;
+  isPlaying: boolean;
+  latestResultText?: string;
+  latestResultKey?: string;
+  latestSpokenResultKey?: string;
+  lastStatus: "idle" | "disabled" | "speaking" | "skippedDuplicate" | "stopped" | "failed";
+  tts: TtsStatusSnapshot;
 };
 
 export type VoiceExperienceState =
@@ -137,6 +148,25 @@ export function shouldExpandTimelineForEvent(event?: AgentEvent): boolean {
   return event?.kind === "confirm" || event?.kind === "error";
 }
 
+export function autoTtsStatusLabel(status?: AutoTtsStatusSnapshot | null): string {
+  if (!status) {
+    return "Auto speech unknown";
+  }
+  if (!status.enabled) {
+    return "Auto speech off";
+  }
+  if (status.isPlaying || status.lastStatus === "speaking") {
+    return "Speaking reply";
+  }
+  if (status.lastStatus === "skippedDuplicate") {
+    return "Duplicate skipped";
+  }
+  if (status.lastStatus === "failed") {
+    return status.tts.error ? `Auto speech failed: ${status.tts.error}` : "Auto speech failed";
+  }
+  return "Auto speech on";
+}
+
 export function AssistantConsole() {
   const [closeBehavior, setCloseBehaviorState] = useState<"hide" | "exit">(
     "hide",
@@ -148,9 +178,11 @@ export function AssistantConsole() {
   const [isSavingVadConfig, setIsSavingVadConfig] = useState(false);
   const [ttsText, setTtsText] = useState("你好。");
   const [ttsStatus, setTtsStatus] = useState<TtsStatusSnapshot | null>(null);
+  const [autoTtsStatus, setAutoTtsStatus] = useState<AutoTtsStatusSnapshot | null>(null);
   const [ttsMessage, setTtsMessage] = useState<string | null>(null);
   const [isSynthesizingTts, setIsSynthesizingTts] = useState(false);
   const [isPlayingTts, setIsPlayingTts] = useState(false);
+  const [isUpdatingAutoTts, setIsUpdatingAutoTts] = useState(false);
   const {
     state,
     transcript,
@@ -193,12 +225,44 @@ export function AssistantConsole() {
         }
         setTtsMessage("Failed to load TTS status.");
       }
+
+      try {
+        const status = await invoke<AutoTtsStatusSnapshot>("get_auto_tts_status");
+        if (!active) {
+          return;
+        }
+        setAutoTtsStatus(status);
+      } catch {
+        if (!active) {
+          return;
+        }
+        setTtsMessage("Failed to load auto speech status.");
+      }
     }
 
     void loadRuntimeConfig();
 
     return () => {
       active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    async function setupAutoTtsEvents() {
+      unlisten = await listen<AutoTtsStatusSnapshot>("auto-tts-state", (event) => {
+        setAutoTtsStatus(event.payload);
+        setTtsStatus(event.payload.tts);
+      });
+    }
+
+    void setupAutoTtsEvents();
+
+    return () => {
+      if (unlisten) {
+        unlisten();
+      }
     };
   }, []);
 
@@ -335,6 +399,48 @@ export function AssistantConsole() {
     }
   }
 
+  async function setAutoTtsEnabled(enabled: boolean) {
+    setIsUpdatingAutoTts(true);
+    setTtsMessage(null);
+    try {
+      const status = await invoke<AutoTtsStatusSnapshot>("set_auto_tts_enabled", { enabled });
+      setAutoTtsStatus(status);
+      setTtsStatus(status.tts);
+    } catch (error) {
+      setTtsMessage(String(error));
+    } finally {
+      setIsUpdatingAutoTts(false);
+    }
+  }
+
+  async function stopAutoTts() {
+    setIsUpdatingAutoTts(true);
+    setTtsMessage(null);
+    try {
+      const status = await invoke<AutoTtsStatusSnapshot>("stop_auto_tts");
+      setAutoTtsStatus(status);
+      setTtsStatus(status.tts);
+    } catch (error) {
+      setTtsMessage(String(error));
+    } finally {
+      setIsUpdatingAutoTts(false);
+    }
+  }
+
+  async function speakLatestResult() {
+    setIsUpdatingAutoTts(true);
+    setTtsMessage(null);
+    try {
+      const status = await invoke<AutoTtsStatusSnapshot>("speak_latest_result");
+      setAutoTtsStatus(status);
+      setTtsStatus(status.tts);
+    } catch (error) {
+      setTtsMessage(String(error));
+    } finally {
+      setIsUpdatingAutoTts(false);
+    }
+  }
+
   return (
     <main className="voice-shell min-h-screen p-3 text-slate-950 sm:p-5">
       <section className="voice-console mx-auto flex min-h-[calc(100vh-1.5rem)] w-full max-w-6xl flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-[0_18px_48px_rgba(15,23,42,0.10)] sm:min-h-[calc(100vh-2.5rem)] sm:p-5">
@@ -391,6 +497,7 @@ export function AssistantConsole() {
               <StatusRow label="Voice" value={copy.status} tone={experienceState} />
               <StatusRow label="ASR" value={asrStatusLabel(asrStatus)} />
               <StatusRow label="Agent" value={agent.connectionLabel} tone={agent.connectionState === "error" ? "Error" : agent.connectionState === "connected" ? "Listening" : "Dormant"} />
+              <StatusRow label="Speech" value={autoTtsStatusLabel(autoTtsStatus)} tone={autoTtsStatus?.isPlaying ? "Responding" : "Dormant"} />
             </section>
 
             <section className="mt-4 border-t border-slate-200 pt-4" aria-label="Fallback controls">
@@ -483,6 +590,45 @@ export function AssistantConsole() {
             </section>
 
             <section className="mt-4 border-t border-slate-200 pt-4" aria-label="Developer TTS controls">
+              <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
+                Auto Speech
+              </div>
+              <div className="mb-4 grid gap-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    className={`min-h-10 cursor-pointer rounded-lg border px-3 text-sm font-extrabold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60 ${
+                      autoTtsStatus?.enabled
+                        ? "border-slate-950 bg-slate-950 text-white"
+                        : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
+                    }`}
+                    onClick={() => setAutoTtsEnabled(!autoTtsStatus?.enabled)}
+                    disabled={isUpdatingAutoTts}
+                    type="button"
+                  >
+                    {autoTtsStatus?.enabled ? "Auto On" : "Auto Off"}
+                  </button>
+                  <button
+                    className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={speakLatestResult}
+                    disabled={isUpdatingAutoTts || !autoTtsStatus?.latestResultText}
+                    type="button"
+                  >
+                    Replay
+                  </button>
+                </div>
+                <button
+                  className="min-h-10 cursor-pointer rounded-lg border border-rose-300 bg-rose-50 px-3 text-sm font-extrabold text-rose-800 transition-colors duration-200 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-900 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={stopAutoTts}
+                  disabled={isUpdatingAutoTts || !autoTtsStatus?.isPlaying}
+                  type="button"
+                >
+                  Stop Auto Speech
+                </button>
+                <p className="text-xs text-slate-600">
+                  {autoTtsStatusLabel(autoTtsStatus)}
+                </p>
+              </div>
+
               <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
                 Dev · TTS Test
               </div>

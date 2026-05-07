@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tauri::{AppHandle, Emitter};
-use tokio::time::{sleep, Duration};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::time::{Duration, sleep};
 #[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
-use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
+use tts_core::{AudioBuffer, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ, PcmData};
 use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult};
 
-use crate::audio::{playback_buffer_from_tts, AudioOutput};
-use crate::model_paths::{resolve_tts_model_path, resolve_tts_model_path_with_app, ModelPathSnapshot};
+use crate::audio::{AudioOutput, playback_buffer_from_tts};
+use crate::model_paths::{
+    ModelPathSnapshot, resolve_tts_model_path, resolve_tts_model_path_with_app,
+};
 #[cfg(feature = "tts-moss-onnx")]
 use tts_moss::{MossModelConfig, MossOnnxTtsEngine};
 
@@ -33,14 +35,52 @@ pub struct TtsStatusSnapshot {
     pub has_buffered_audio: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AutoTtsLastStatus {
+    Idle,
+    Disabled,
+    Speaking,
+    SkippedDuplicate,
+    Stopped,
+    Failed,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoTtsStatusSnapshot {
+    pub enabled: bool,
+    pub is_playing: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_result_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_result_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_spoken_result_key: Option<String>,
+    pub last_status: AutoTtsLastStatus,
+    pub tts: TtsStatusSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct AutoTtsState {
+    enabled: bool,
+    is_playing: bool,
+    latest_result_text: Option<String>,
+    latest_result_key: Option<String>,
+    latest_spoken_result_key: Option<String>,
+    last_status: AutoTtsLastStatus,
+}
+
 struct TtsRuntimeInner {
     snapshot: TtsStatusSnapshot,
     latest_result: Option<TtsResult>,
     output: Option<AudioOutput>,
     paused_recording: bool,
     cancel_requested: bool,
+    auto: AutoTtsState,
 }
 
+#[derive(Clone)]
 pub struct TtsRuntime {
     inner: Arc<Mutex<TtsRuntimeInner>>,
     engine: Arc<dyn TtsEngine>,
@@ -137,6 +177,14 @@ impl TtsRuntime {
                 output: None,
                 paused_recording: false,
                 cancel_requested: false,
+                auto: AutoTtsState {
+                    enabled: true,
+                    is_playing: false,
+                    latest_result_text: None,
+                    latest_result_key: None,
+                    latest_spoken_result_key: None,
+                    last_status: AutoTtsLastStatus::Idle,
+                },
             })),
             engine,
             engine_name,
@@ -159,17 +207,71 @@ impl TtsRuntime {
         }
     }
 
+    fn auto_snapshot_locked(inner: &TtsRuntimeInner) -> AutoTtsStatusSnapshot {
+        AutoTtsStatusSnapshot {
+            enabled: inner.auto.enabled,
+            is_playing: inner.auto.is_playing,
+            latest_result_text: inner.auto.latest_result_text.clone(),
+            latest_result_key: inner.auto.latest_result_key.clone(),
+            latest_spoken_result_key: inner.auto.latest_spoken_result_key.clone(),
+            last_status: inner.auto.last_status,
+            tts: inner.snapshot.clone(),
+        }
+    }
+
+    fn emit_auto_state(&self, app: Option<&AppHandle>) -> AutoTtsStatusSnapshot {
+        let snapshot = {
+            let inner = self.inner.lock();
+            Self::auto_snapshot_locked(&inner)
+        };
+        if let Some(app) = app {
+            let _ = app.emit("auto-tts-state", &snapshot);
+        }
+        snapshot
+    }
+
     pub fn status(&self) -> TtsStatusSnapshot {
         self.inner.lock().snapshot.clone()
     }
 
+    pub fn auto_status(&self) -> AutoTtsStatusSnapshot {
+        let inner = self.inner.lock();
+        Self::auto_snapshot_locked(&inner)
+    }
+
+    pub fn set_auto_enabled(
+        &self,
+        app: Option<&AppHandle>,
+        enabled: bool,
+    ) -> AutoTtsStatusSnapshot {
+        {
+            let mut inner = self.inner.lock();
+            inner.auto.enabled = enabled;
+            inner.auto.last_status = if enabled {
+                AutoTtsLastStatus::Idle
+            } else {
+                inner.cancel_requested = true;
+                AutoTtsLastStatus::Disabled
+            };
+        }
+        self.emit_auto_state(app)
+    }
+
     pub async fn prepare(&self, app: Option<&AppHandle>) -> Result<TtsStatusSnapshot, String> {
-        let healthy = self.engine.health_check().await.map_err(|e| e.to_string())?;
+        let healthy = self
+            .engine
+            .health_check()
+            .await
+            .map_err(|e| e.to_string())?;
         if healthy {
             self.set_state(app, TtsState::Idle, None);
             Ok(self.status())
         } else {
-            self.set_state(app, TtsState::Failed, Some("TTS engine health check failed".to_string()));
+            self.set_state(
+                app,
+                TtsState::Failed,
+                Some("TTS engine health check failed".to_string()),
+            );
             Err("TTS engine health check failed".to_string())
         }
     }
@@ -201,6 +303,189 @@ impl TtsRuntime {
 
     pub fn cancel_playback(&self) {
         self.inner.lock().cancel_requested = true;
+    }
+
+    pub async fn play_buffered(
+        &self,
+        app: AppHandle,
+        vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
+        vad_config_state: tauri::State<'_, crate::vad_commands::VadRuntimeConfigState>,
+    ) -> Result<TtsStatusSnapshot, String> {
+        let buffer = {
+            let mut inner = self.inner.lock();
+            inner.cancel_requested = false;
+            let result = inner
+                .latest_result
+                .as_ref()
+                .ok_or_else(|| "No synthesized audio available".to_string())?;
+            playback_buffer_from_tts(&result.audio).map_err(|e| e.to_string())?
+        };
+
+        let had_active_session = vad_state.has_active_session();
+        if had_active_session {
+            crate::vad_commands::stop_listening(app.clone(), vad_state.clone())?;
+            self.inner.lock().paused_recording = true;
+        }
+
+        self.set_state(Some(&app), TtsState::Playing, None);
+
+        let output = match AudioOutput::new() {
+            Ok(output) => output,
+            Err(e) => {
+                self.set_state(Some(&app), TtsState::Failed, Some(e.to_string()));
+                if self.inner.lock().paused_recording {
+                    let _ = crate::vad_commands::start_listening(
+                        app.clone(),
+                        vad_state.clone(),
+                        vad_config_state,
+                    )
+                    .await;
+                    self.inner.lock().paused_recording = false;
+                }
+                return Err("Failed to create output stream".to_string());
+            }
+        };
+
+        output.enqueue(buffer);
+        {
+            let mut inner = self.inner.lock();
+            inner.output = Some(output);
+        }
+
+        loop {
+            let (cancelled, done) = {
+                let inner = self.inner.lock();
+                let done = inner.output.as_ref().map(|o| o.is_empty()).unwrap_or(true);
+                (inner.cancel_requested, done)
+            };
+
+            if cancelled {
+                if let Some(output) = self.inner.lock().output.as_ref() {
+                    output.clear();
+                }
+                break;
+            }
+
+            if done {
+                break;
+            }
+
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        {
+            let mut inner = self.inner.lock();
+            inner.output.take();
+        }
+
+        if self.inner.lock().paused_recording {
+            crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await?;
+            self.inner.lock().paused_recording = false;
+        }
+
+        self.set_state(Some(&app), TtsState::Idle, None);
+        Ok(self.status())
+    }
+
+    pub async fn speak_agent_result(
+        &self,
+        app: AppHandle,
+        result_id: Option<String>,
+        content: String,
+    ) -> Result<AutoTtsStatusSnapshot, String> {
+        self.speak_auto_result(app, result_id, content, false).await
+    }
+
+    pub async fn speak_latest_auto_result(
+        &self,
+        app: AppHandle,
+    ) -> Result<AutoTtsStatusSnapshot, String> {
+        let (text, key) = {
+            let inner = self.inner.lock();
+            let text = inner
+                .auto
+                .latest_result_text
+                .clone()
+                .ok_or_else(|| "No latest Agent result available".to_string())?;
+            (text, inner.auto.latest_result_key.clone())
+        };
+        self.speak_auto_result(app, key, text, true).await
+    }
+
+    async fn speak_auto_result(
+        &self,
+        app: AppHandle,
+        result_key_or_id: Option<String>,
+        content: String,
+        force: bool,
+    ) -> Result<AutoTtsStatusSnapshot, String> {
+        let text = content.trim().to_string();
+        if text.is_empty() {
+            return Ok(self.emit_auto_state(Some(&app)));
+        }
+
+        let key = if force {
+            result_key_or_id.unwrap_or_else(|| auto_tts_result_key(None, &text))
+        } else {
+            auto_tts_result_key(result_key_or_id.as_deref(), &text)
+        };
+        {
+            let mut inner = self.inner.lock();
+            inner.auto.latest_result_text = Some(text.clone());
+            inner.auto.latest_result_key = Some(key.clone());
+
+            if !inner.auto.enabled && !force {
+                inner.auto.last_status = AutoTtsLastStatus::Disabled;
+                drop(inner);
+                return Ok(self.emit_auto_state(Some(&app)));
+            }
+
+            if !force && inner.auto.latest_spoken_result_key.as_deref() == Some(key.as_str()) {
+                inner.auto.last_status = AutoTtsLastStatus::SkippedDuplicate;
+                drop(inner);
+                return Ok(self.emit_auto_state(Some(&app)));
+            }
+
+            inner.auto.is_playing = true;
+            inner.auto.last_status = AutoTtsLastStatus::Speaking;
+            inner.auto.latest_spoken_result_key = Some(key);
+        }
+        self.emit_auto_state(Some(&app));
+
+        let result = async {
+            self.synthesize(Some(&app), text, TtsConfig::default())
+                .await?;
+            self.play_buffered(
+                app.clone(),
+                app.state::<crate::vad_commands::VadRecorderState>(),
+                app.state::<crate::vad_commands::VadRuntimeConfigState>(),
+            )
+            .await
+        }
+        .await;
+
+        {
+            let mut inner = self.inner.lock();
+            inner.auto.is_playing = false;
+            inner.auto.last_status = match &result {
+                Ok(_) if inner.cancel_requested => AutoTtsLastStatus::Stopped,
+                Ok(_) => AutoTtsLastStatus::Idle,
+                Err(_) => AutoTtsLastStatus::Failed,
+            };
+        }
+        let snapshot = self.emit_auto_state(Some(&app));
+        result.map(|_| snapshot).inspect_err(|err| {
+            let mut inner = self.inner.lock();
+            inner.snapshot.error = Some(err.clone());
+        })
+    }
+}
+
+pub(crate) fn auto_tts_result_key(result_id: Option<&str>, content: &str) -> String {
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    match result_id {
+        Some(id) if !id.is_empty() => format!("{id}:{normalized}"),
+        _ => normalized,
     }
 }
 
@@ -313,7 +598,9 @@ pub async fn synthesize_tts(
     runtime: tauri::State<'_, TtsRuntime>,
     text: String,
 ) -> Result<TtsStatusSnapshot, String> {
-    runtime.synthesize(Some(&app), text, TtsConfig::default()).await
+    runtime
+        .synthesize(Some(&app), text, TtsConfig::default())
+        .await
 }
 
 #[tauri::command]
@@ -323,80 +610,9 @@ pub async fn play_tts(
     vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
     vad_config_state: tauri::State<'_, crate::vad_commands::VadRuntimeConfigState>,
 ) -> Result<TtsStatusSnapshot, String> {
-    let buffer = {
-        let mut inner = runtime.inner.lock();
-        inner.cancel_requested = false;
-        let result = inner
-            .latest_result
-            .as_ref()
-            .ok_or_else(|| "No synthesized audio available".to_string())?;
-        playback_buffer_from_tts(&result.audio).map_err(|e| e.to_string())?
-    };
-
-    let had_active_session = vad_state.has_active_session();
-    if had_active_session {
-        crate::vad_commands::stop_listening(app.clone(), vad_state.clone())?;
-        runtime.inner.lock().paused_recording = true;
-    }
-
-    runtime.set_state(Some(&app), TtsState::Playing, None);
-
-    let output = match AudioOutput::new() {
-        Ok(output) => output,
-        Err(e) => {
-            runtime.set_state(Some(&app), TtsState::Failed, Some(e.to_string()));
-            if runtime.inner.lock().paused_recording {
-                let _ = crate::vad_commands::start_listening(
-                    app.clone(),
-                    vad_state.clone(),
-                    vad_config_state,
-                )
-                .await;
-                runtime.inner.lock().paused_recording = false;
-            }
-            return Err("Failed to create output stream".to_string());
-        }
-    };
-
-    output.enqueue(buffer);
-    {
-        let mut inner = runtime.inner.lock();
-        inner.output = Some(output);
-    }
-
-    loop {
-        let (cancelled, done) = {
-            let inner = runtime.inner.lock();
-            let done = inner.output.as_ref().map(|o| o.is_empty()).unwrap_or(true);
-            (inner.cancel_requested, done)
-        };
-
-        if cancelled {
-            if let Some(output) = runtime.inner.lock().output.as_ref() {
-                output.clear();
-            }
-            break;
-        }
-
-        if done {
-            break;
-        }
-
-        sleep(Duration::from_millis(20)).await;
-    }
-
-    {
-        let mut inner = runtime.inner.lock();
-        inner.output.take();
-    }
-
-    if runtime.inner.lock().paused_recording {
-        crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await?;
-        runtime.inner.lock().paused_recording = false;
-    }
-
-    runtime.set_state(Some(&app), TtsState::Idle, None);
-    Ok(runtime.status())
+    runtime
+        .play_buffered(app, vad_state, vad_config_state)
+        .await
 }
 
 #[tauri::command]
@@ -410,12 +626,62 @@ pub async fn cancel_tts_playback(
 
     let should_resume = runtime.inner.lock().paused_recording;
     if should_resume {
-        let _ = crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await;
+        let _ =
+            crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await;
         runtime.inner.lock().paused_recording = false;
     }
 
     runtime.set_state(Some(&app), TtsState::Idle, None);
     Ok(runtime.status())
+}
+
+#[tauri::command]
+pub fn get_auto_tts_status(
+    runtime: tauri::State<'_, TtsRuntime>,
+) -> Result<AutoTtsStatusSnapshot, String> {
+    Ok(runtime.auto_status())
+}
+
+#[tauri::command]
+pub fn set_auto_tts_enabled(
+    app: AppHandle,
+    runtime: tauri::State<'_, TtsRuntime>,
+    enabled: bool,
+) -> Result<AutoTtsStatusSnapshot, String> {
+    Ok(runtime.set_auto_enabled(Some(&app), enabled))
+}
+
+#[tauri::command]
+pub async fn stop_auto_tts(
+    app: AppHandle,
+    runtime: tauri::State<'_, TtsRuntime>,
+    vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
+    vad_config_state: tauri::State<'_, crate::vad_commands::VadRuntimeConfigState>,
+) -> Result<AutoTtsStatusSnapshot, String> {
+    runtime.cancel_playback();
+
+    let should_resume = runtime.inner.lock().paused_recording;
+    if should_resume {
+        let _ =
+            crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await;
+        runtime.inner.lock().paused_recording = false;
+    }
+
+    {
+        let mut inner = runtime.inner.lock();
+        inner.auto.is_playing = false;
+        inner.auto.last_status = AutoTtsLastStatus::Stopped;
+    }
+    runtime.set_state(Some(&app), TtsState::Idle, None);
+    Ok(runtime.emit_auto_state(Some(&app)))
+}
+
+#[tauri::command]
+pub async fn speak_latest_result(
+    app: AppHandle,
+    runtime: tauri::State<'_, TtsRuntime>,
+) -> Result<AutoTtsStatusSnapshot, String> {
+    runtime.speak_latest_auto_result(app).await
 }
 
 #[cfg(test)]
@@ -474,7 +740,9 @@ mod tests {
             model_id: crate::model_paths::MOSS_TTS_MODEL_ID,
             engine_name: crate::model_paths::MOSS_TTS_ENGINE_NAME,
             package_dir: std::path::PathBuf::from("models/tts/moss-tts-nano-100m-onnx"),
-            engine_model_dir: std::path::PathBuf::from("models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX"),
+            engine_model_dir: std::path::PathBuf::from(
+                "models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX",
+            ),
             source: crate::model_paths::ModelPathSource::DevFallback,
             legacy_layout: false,
             missing_files: Vec::new(),
@@ -499,5 +767,41 @@ mod tests {
             .synthesize(None, "hello".to_string(), TtsConfig::default())
             .await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn auto_tts_result_key_uses_id_and_normalized_content() {
+        assert_eq!(
+            auto_tts_result_key(Some("message-1"), "hello   world\nagain"),
+            "message-1:hello world again"
+        );
+        assert_eq!(auto_tts_result_key(None, " hello "), "hello");
+    }
+
+    #[test]
+    fn auto_tts_tracks_enabled_status_and_dedupe_key() {
+        let runtime = TtsRuntime::new(Arc::new(MockTtsEngine));
+
+        assert!(runtime.auto_status().enabled);
+        let disabled = runtime.set_auto_enabled(None, false);
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.last_status, AutoTtsLastStatus::Disabled);
+
+        {
+            let mut inner = runtime.inner.lock();
+            inner.auto.latest_result_text = Some("Done".to_string());
+            inner.auto.latest_result_key = Some("result-1:Done".to_string());
+            inner.auto.latest_spoken_result_key = Some("result-1:Done".to_string());
+            inner.auto.last_status = AutoTtsLastStatus::SkippedDuplicate;
+        }
+
+        let status = runtime.auto_status();
+        assert_eq!(status.latest_result_text.as_deref(), Some("Done"));
+        assert_eq!(status.latest_result_key.as_deref(), Some("result-1:Done"));
+        assert_eq!(
+            status.latest_spoken_result_key.as_deref(),
+            Some("result-1:Done")
+        );
+        assert_eq!(status.last_status, AutoTtsLastStatus::SkippedDuplicate);
     }
 }

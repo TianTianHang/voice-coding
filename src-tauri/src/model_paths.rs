@@ -567,14 +567,18 @@ mod tests {
         let resolved = resolve_asr_model_path_with_context(&fixture.context());
 
         assert!(resolved.error.as_ref().unwrap().contains("Qwen3 ASR"));
-        assert!(resolved
-            .missing_files
-            .iter()
-            .any(|file| file.path == "config.json"));
-        assert!(resolved
-            .missing_files
-            .iter()
-            .any(|file| file.path.contains("encoder")));
+        assert!(
+            resolved
+                .missing_files
+                .iter()
+                .any(|file| file.path == "config.json")
+        );
+        assert!(
+            resolved
+                .missing_files
+                .iter()
+                .any(|file| file.path.contains("encoder"))
+        );
     }
 
     #[test]
@@ -665,10 +669,12 @@ mod tests {
         let resolved = resolve_tts_model_path_with_context(&fixture.context());
 
         assert!(resolved.error.as_ref().unwrap().contains("MOSS TTS"));
-        assert!(resolved
-            .missing_files
-            .iter()
-            .any(|file| file.path.contains(MOSS_CODEC_COMPONENT_DIR)));
+        assert!(
+            resolved
+                .missing_files
+                .iter()
+                .any(|file| file.path.contains(MOSS_CODEC_COMPONENT_DIR))
+        );
     }
 
     struct Fixture {

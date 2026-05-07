@@ -12,8 +12,7 @@ use tokio::sync::{Mutex, Notify};
 
 #[cfg(feature = "stt-qwen3")]
 use crate::model_paths::{
-    resolve_asr_model_path, resolve_asr_model_path_with_app, ModelPathSnapshot,
-    ResolvedModelPath,
+    ModelPathSnapshot, ResolvedModelPath, resolve_asr_model_path, resolve_asr_model_path_with_app,
 };
 
 #[cfg(feature = "stt-qwen3")]
@@ -177,7 +176,11 @@ impl AsrRuntime {
 
             match load {
                 LoadAction::Wait(notify) => notify.notified().await,
-                LoadAction::Start { notify, model_path, model_dir } => {
+                LoadAction::Start {
+                    notify,
+                    model_path,
+                    model_dir,
+                } => {
                     let loader = self.loader.clone();
                     let load_model_dir = model_dir.clone();
                     let load_result =
