@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Manager, WindowEvent};
+use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CloseBehavior {
@@ -46,16 +47,34 @@ fn set_close_behavior(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .targets([
+                    Target::new(TargetKind::Stdout),
+                    Target::new(TargetKind::LogDir {
+                        file_name: Some("backend".into()),
+                    }),
+                ])
+                .rotation_strategy(RotationStrategy::KeepSome(5))
+                .max_file_size(2_000_000)
+                .level(log::LevelFilter::Info)
+                .level_for("voice_coding_lib", log::LevelFilter::Debug)
+                .level_for("stt_qwen3", log::LevelFilter::Info)
+                .level_for("tts_moss", log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_opener::init())
         .manage(vad_commands::VadRecorderState::new())
         .manage(vad_commands::VadRuntimeConfigState::new())
         .manage(acp::AcpRuntime::default())
         .manage(AppLifecycleState::new())
         .setup(|app| {
+            log::info!("voice-coding backend setup started");
             app.manage(tts::TtsRuntime::with_app(app.handle()));
             #[cfg(feature = "stt-qwen3")]
             asr::prewarm_asr(app.handle().clone());
             setup_tray(app)?;
+            log::info!("voice-coding backend setup finished");
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -64,10 +83,12 @@ pub fn run() {
                 let behavior = *app.state::<AppLifecycleState>().close_behavior.lock();
                 match behavior {
                     CloseBehavior::HideToTray => {
+                        log::info!("main window close requested; hiding to tray");
                         api.prevent_close();
                         let _ = window.hide();
                     }
                     CloseBehavior::Exit => {
+                        log::info!("main window close requested; exiting application");
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
                             let _ = vad_commands::stop_listening(
@@ -124,11 +145,13 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "hide" => {
+                log::debug!("tray hide requested");
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
             }
             "quit" => {
+                log::info!("tray quit requested");
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     let _ = vad_commands::stop_listening(
@@ -159,6 +182,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 fn show_main_window(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
+        log::debug!("showing main window");
         let _ = window.show();
         let _ = window.set_focus();
     }

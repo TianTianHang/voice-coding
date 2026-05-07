@@ -136,12 +136,23 @@ fn default_tts_engine() -> Arc<dyn TtsEngine> {
     #[cfg(feature = "tts-moss-onnx")]
     {
         let model_path = resolve_tts_model_path();
+        log::info!(
+            "creating default TTS engine: model_dir={} source={:?}",
+            model_path.engine_model_dir.display(),
+            model_path.source
+        );
         let config = MossModelConfig {
             model_dir: model_path.engine_model_dir,
         };
         match MossOnnxTtsEngine::new(config) {
-            Ok(engine) => Arc::new(engine),
-            Err(err) => Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string())),
+            Ok(engine) => {
+                log::info!("default TTS engine ready");
+                Arc::new(engine)
+            }
+            Err(err) => {
+                log::error!("failed to create default TTS engine: {err}");
+                Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string()))
+            }
         }
     }
 
@@ -166,6 +177,12 @@ impl TtsRuntime {
 
     pub fn with_app(app: &AppHandle) -> Self {
         let model = tts_model_snapshot_with_app(app);
+        log::info!(
+            "creating TTS runtime: engine={} model_dir={} source={:?}",
+            model.engine_name,
+            model.model_dir,
+            model.source
+        );
         let engine = default_tts_engine_with_model_dir(std::path::PathBuf::from(&model.model_dir));
         Self::new_with_model(engine, model)
     }
@@ -215,6 +232,12 @@ impl TtsRuntime {
         if let Some(app) = app {
             let _ = app.emit("tts-state", &snapshot);
         }
+        log::debug!(
+            "TTS state updated: state={:?} has_buffered_audio={} error={:?}",
+            snapshot.state,
+            snapshot.has_buffered_audio,
+            snapshot.error
+        );
     }
 
     fn auto_snapshot_locked(inner: &TtsRuntimeInner) -> AutoTtsStatusSnapshot {
@@ -238,6 +261,13 @@ impl TtsRuntime {
         if let Some(app) = app {
             let _ = app.emit("auto-tts-state", &snapshot);
         }
+        log::debug!(
+            "auto TTS state updated: status={:?} enabled={} playing={} skip={:?}",
+            snapshot.last_status,
+            snapshot.enabled,
+            snapshot.is_playing,
+            snapshot.last_skip_reason
+        );
         snapshot
     }
 
@@ -293,15 +323,18 @@ impl TtsRuntime {
     }
 
     pub async fn prepare(&self, app: Option<&AppHandle>) -> Result<TtsStatusSnapshot, String> {
+        log::info!("TTS health check started: engine={}", self.engine_name);
         let healthy = self
             .engine
             .health_check()
             .await
             .map_err(|e| e.to_string())?;
         if healthy {
+            log::info!("TTS health check passed");
             self.set_state(app, TtsState::Idle, None);
             Ok(self.status())
         } else {
+            log::error!("TTS health check failed");
             self.set_state(
                 app,
                 TtsState::Failed,
@@ -317,6 +350,8 @@ impl TtsRuntime {
         text: String,
         config: TtsConfig,
     ) -> Result<TtsStatusSnapshot, String> {
+        let started = Instant::now();
+        log::info!("TTS synthesis started: chars={}", text.chars().count());
         {
             let mut inner = self.inner.lock();
             Self::stop_playback_locked(&mut inner);
@@ -329,6 +364,13 @@ impl TtsRuntime {
             .await
             .map_err(|e| e.to_string())?;
         result.validate_for_playback().map_err(|e| e.to_string())?;
+        let duration_ms = (result.audio.pcm.len_frames(result.audio.channels) as u128 * 1000)
+            / result.audio.sample_rate_hz.max(1) as u128;
+        log::info!(
+            "TTS synthesis finished in {}ms: duration_ms={}",
+            started.elapsed().as_millis(),
+            duration_ms
+        );
 
         {
             let mut inner = self.inner.lock();
@@ -341,6 +383,7 @@ impl TtsRuntime {
     }
 
     pub fn cancel_playback(&self) {
+        log::info!("TTS playback cancellation requested");
         let mut inner = self.inner.lock();
         Self::stop_playback_locked(&mut inner);
     }
@@ -351,6 +394,7 @@ impl TtsRuntime {
         vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
         vad_config_state: tauri::State<'_, crate::vad_commands::VadRuntimeConfigState>,
     ) -> Result<TtsStatusSnapshot, String> {
+        log::info!("TTS playback requested");
         let buffer = {
             let mut inner = self.inner.lock();
             Self::stop_playback_locked(&mut inner);
@@ -364,6 +408,7 @@ impl TtsRuntime {
 
         let had_active_session = vad_state.has_active_session();
         if had_active_session {
+            log::info!("pausing VAD recording for TTS playback");
             crate::vad_commands::stop_listening(app.clone(), vad_state.clone())?;
             self.inner.lock().paused_recording = true;
         }
@@ -373,8 +418,10 @@ impl TtsRuntime {
         let output = match AudioOutput::new() {
             Ok(output) => output,
             Err(e) => {
+                log::error!("failed to create audio output for TTS playback: {e}");
                 self.set_state(Some(&app), TtsState::Failed, Some(e.to_string()));
                 if self.inner.lock().paused_recording {
+                    log::info!("resuming VAD recording after TTS output creation failure");
                     let _ = crate::vad_commands::start_listening(
                         app.clone(),
                         vad_state.clone(),
@@ -388,6 +435,10 @@ impl TtsRuntime {
         };
 
         let playback_deadline = Instant::now() + buffer.duration();
+        log::info!(
+            "TTS playback started: duration_ms={}",
+            buffer.duration().as_millis()
+        );
         output.enqueue(buffer);
         let playback_epoch = {
             let mut inner = self.inner.lock();
@@ -428,6 +479,7 @@ impl TtsRuntime {
             inner.playback_epoch == playback_epoch && inner.paused_recording
         };
         if should_resume_recording {
+            log::info!("resuming VAD recording after TTS playback");
             crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await?;
             let mut inner = self.inner.lock();
             if inner.playback_epoch == playback_epoch {
@@ -438,6 +490,7 @@ impl TtsRuntime {
         if self.inner.lock().playback_epoch == playback_epoch {
             self.set_state(Some(&app), TtsState::Idle, None);
         }
+        log::info!("TTS playback finished");
         Ok(self.status())
     }
 
@@ -476,8 +529,8 @@ impl TtsRuntime {
         content_is_spoken_text: bool,
     ) -> Result<AutoTtsStatusSnapshot, String> {
         let raw_text = content.trim().to_string();
-        eprintln!(
-            "[auto-tts] speak_auto_result force={force} content_is_spoken_text={content_is_spoken_text} raw_len={}",
+        log::debug!(
+            "auto TTS requested: force={force} content_is_spoken_text={content_is_spoken_text} raw_len={}",
             raw_text.len()
         );
         if raw_text.is_empty() {
@@ -490,7 +543,7 @@ impl TtsRuntime {
         let speakable_text = match auto_tts_spoken_text(&raw_text, content_is_spoken_text) {
             Ok(text) => text,
             Err(reason) => {
-                eprintln!("[auto-tts] skip before synth: {reason}");
+                log::debug!("auto TTS skipped before synthesis: {reason}");
                 let mut inner = self.inner.lock();
                 inner.auto.last_status = reason.status();
                 inner.auto.last_skip_reason = Some(reason.to_string());
@@ -510,7 +563,7 @@ impl TtsRuntime {
             inner.auto.latest_result_key = Some(key.clone());
 
             if !inner.auto.enabled && !force {
-                eprintln!("[auto-tts] skip disabled key={key}");
+                log::debug!("auto TTS skipped because disabled: key={key}");
                 inner.auto.last_status = AutoTtsLastStatus::Disabled;
                 inner.auto.last_skip_reason = Some("auto TTS is disabled".to_string());
                 drop(inner);
@@ -518,7 +571,7 @@ impl TtsRuntime {
             }
 
             if !force && inner.auto.latest_spoken_result_key.as_deref() == Some(key.as_str()) {
-                eprintln!("[auto-tts] skip duplicate key={key}");
+                log::debug!("auto TTS skipped duplicate result: key={key}");
                 inner.auto.last_status = AutoTtsLastStatus::SkippedDuplicate;
                 inner.auto.last_skip_reason =
                     Some("extracted TTS text already matches latest spoken result".to_string());
@@ -530,8 +583,8 @@ impl TtsRuntime {
             inner.auto.last_status = AutoTtsLastStatus::Speaking;
             inner.auto.last_skip_reason = None;
         }
-        eprintln!(
-            "[auto-tts] synth/play start key={key} spoken_len={}",
+        log::info!(
+            "auto TTS synthesis/playback started: key={key} spoken_len={}",
             speakable_text.len()
         );
         self.emit_auto_state(Some(&app));
@@ -561,8 +614,8 @@ impl TtsRuntime {
             };
         }
         match &result {
-            Ok(_) => eprintln!("[auto-tts] synth/play finished"),
-            Err(err) => eprintln!("[auto-tts] synth/play failed: {err}"),
+            Ok(_) => log::info!("auto TTS synthesis/playback finished"),
+            Err(err) => log::error!("auto TTS synthesis/playback failed: {err}"),
         }
         let snapshot = self.emit_auto_state(Some(&app));
         result.map(|_| snapshot).inspect_err(|err| {
@@ -722,8 +775,14 @@ fn has_case_mismatched_tts_tag(content: &str) -> bool {
 fn default_tts_engine_with_model_dir(model_dir: std::path::PathBuf) -> Arc<dyn TtsEngine> {
     let config = MossModelConfig { model_dir };
     match MossOnnxTtsEngine::new(config) {
-        Ok(engine) => Arc::new(engine),
-        Err(err) => Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string())),
+        Ok(engine) => {
+            log::info!("TTS engine ready");
+            Arc::new(engine)
+        }
+        Err(err) => {
+            log::error!("failed to create TTS engine: {err}");
+            Arc::new(StartupErrorTtsEngine::new("moss-onnx-tts", err.to_string()))
+        }
     }
 }
 

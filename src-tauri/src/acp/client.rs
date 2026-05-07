@@ -50,12 +50,11 @@ impl VoiceCodingAcpClient {
     pub async fn handle_notification(&self, notification: SessionNotification) {
         let event = event_from_notification(notification);
         if event.kind == AgentEventKind::Result {
-            eprintln!(
-                "[acp] result chunk message_id={:?} event_id={} len={} content={:?}",
+            log::debug!(
+                "ACP result chunk: message_id={:?} event_id={} len={}",
                 event.message_id,
                 event.id,
-                event.content.len(),
-                event.content
+                event.content.len()
             );
         }
         self.result_tracker.observe(&event);
@@ -69,6 +68,11 @@ impl VoiceCodingAcpClient {
     ) -> Result<(), String> {
         let confirmation_id = uuid::Uuid::new_v4().to_string();
         let (accept_option, reject_option) = permission_option_ids(&request.options);
+        log::info!(
+            "ACP permission requested: confirmation_id={} options={}",
+            confirmation_id,
+            request.options.len()
+        );
 
         self.pending.lock().insert(
             confirmation_id.clone(),

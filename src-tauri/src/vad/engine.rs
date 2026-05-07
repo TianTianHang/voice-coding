@@ -36,6 +36,12 @@ pub struct VadEngine {
 impl VadEngine {
     pub fn new(lib_path: &Path, hop_size: i32, threshold: f32) -> Result<Self, VadError> {
         unsafe {
+            log::info!(
+                "loading TEN VAD engine: path={} hop_size={} threshold={}",
+                lib_path.display(),
+                hop_size,
+                threshold
+            );
             let library = Library::new(lib_path)
                 .map_err(|e| VadError::Load(format!("Failed to load library: {}", e)))?;
 
@@ -52,12 +58,14 @@ impl VadEngine {
             let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
             let result = create_fn(&mut handle, hop_size, threshold);
             if result != 0 || handle.is_null() {
+                log::error!("TEN VAD initialization failed: code={result}");
                 return Err(VadError::Init(format!(
                     "ten_vad_create failed with code {}",
                     result
                 )));
             }
 
+            log::info!("TEN VAD engine initialized");
             Ok(Self {
                 _library: library,
                 handle,
@@ -79,6 +87,7 @@ impl VadEngine {
                 &mut flag,
             );
             if ret != 0 {
+                log::error!("TEN VAD process failed: code={ret}");
                 return Err(VadError::Process(ret));
             }
             Ok((prob, flag))
@@ -89,6 +98,7 @@ impl VadEngine {
 impl Drop for VadEngine {
     fn drop(&mut self) {
         unsafe {
+            log::debug!("destroying TEN VAD engine");
             (self.destroy_fn)(self.handle);
         }
     }

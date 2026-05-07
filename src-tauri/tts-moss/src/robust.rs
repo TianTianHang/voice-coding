@@ -242,8 +242,7 @@ fn trim_token_edges(token: &str) -> (&str, &str, &str) {
     let start = token
         .char_indices()
         .find(|(index, ch)| {
-            !matches!(ch, '"' | '\'' | '(' | '[' | '{' | '<')
-                && !(*ch == '.' && *index > 0)
+            !(matches!(ch, '"' | '\'' | '(' | '[' | '{' | '<') || *ch == '.' && *index > 0)
         })
         .map(|(index, _)| index)
         .unwrap_or(token.len());
@@ -479,6 +478,12 @@ mod tests {
             normalize_robust_text(input),
             "env app.js.map v2.3.1 https: example.com a b foo bar team release notes"
         );
+    }
+
+    #[test]
+    fn trim_token_edges_keeps_leading_and_internal_dots_in_core() {
+        assert_eq!(trim_token_edges(".env"), ("", ".env", ""));
+        assert_eq!(trim_token_edges("(app.js),"), ("(", "app.js", "),"));
     }
 
     #[test]

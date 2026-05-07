@@ -12,6 +12,13 @@ pub type SdkTransport = ByteStreams<
 >;
 
 pub fn spawn_sdk_transport(profile: &AgentProfile) -> Result<(SdkTransport, Child), String> {
+    log::info!(
+        "spawning ACP agent: profile={} command={} args={:?} cwd={:?}",
+        profile.name,
+        profile.command,
+        profile.args,
+        profile.cwd
+    );
     let mut command = Command::new(&profile.command);
     command
         .args(&profile.args)
@@ -30,6 +37,7 @@ pub fn spawn_sdk_transport(profile: &AgentProfile) -> Result<(SdkTransport, Chil
     let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to start ACP agent '{}': {e}", profile.command))?;
+    log::info!("ACP agent process spawned");
     let stdin = child
         .stdin
         .take()

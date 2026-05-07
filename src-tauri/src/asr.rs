@@ -2,6 +2,7 @@ use std::io::Write;
 use std::path::Path;
 #[cfg(feature = "stt-qwen3")]
 use std::sync::Arc;
+use std::time::Instant;
 use stt_core::{AudioInput, SttConfig, SttEngine};
 #[cfg(feature = "stt-qwen3")]
 use stt_qwen3::{Qwen3AsrEngine, Qwen3LoadTiming};
@@ -145,6 +146,7 @@ impl AsrRuntime {
                 match inner.snapshot.state {
                     AsrLoadState::Ready => return inner.snapshot.clone(),
                     AsrLoadState::Loading => {
+                        log::debug!("ASR prepare requested while model is already loading");
                         let notify = inner
                             .loading
                             .as_ref()
@@ -164,6 +166,12 @@ impl AsrRuntime {
                         inner.snapshot = AsrStatusSnapshot::loading(model_path.clone());
                         let snapshot = inner.snapshot.clone();
                         drop(inner);
+                        log::info!(
+                            "ASR model loading started: engine={} model_dir={} source={:?}",
+                            snapshot.engine_name,
+                            snapshot.model_dir,
+                            snapshot.model.source
+                        );
                         emit_asr_status(app.as_ref(), &snapshot);
                         LoadAction::Start {
                             notify,
@@ -183,6 +191,7 @@ impl AsrRuntime {
                 } => {
                     let loader = self.loader.clone();
                     let load_model_dir = model_dir.clone();
+                    let load_started = Instant::now();
                     let load_result =
                         tauri::async_runtime::spawn_blocking(move || loader(&load_model_dir))
                             .await
@@ -196,8 +205,18 @@ impl AsrRuntime {
                                 let timing = engine.load_timing();
                                 inner.engine = Some(Arc::new(engine));
                                 inner.snapshot = AsrStatusSnapshot::ready(model_path, timing);
+                                log::info!(
+                                    "ASR model ready in {}ms (engine reported {}ms)",
+                                    load_started.elapsed().as_millis(),
+                                    timing.total_ms
+                                );
                             }
                             Err(error) => {
+                                log::error!(
+                                    "ASR model loading failed after {}ms: {}",
+                                    load_started.elapsed().as_millis(),
+                                    error
+                                );
                                 inner.engine = None;
                                 inner.snapshot = AsrStatusSnapshot::failed(model_path, error);
                             }
@@ -336,6 +355,7 @@ pub async fn get_asr_status() -> Result<AsrStatusSnapshot, String> {
 
 #[cfg(feature = "stt-qwen3")]
 pub fn prewarm_asr(app: tauri::AppHandle) {
+    log::info!("ASR prewarm scheduled");
     tauri::async_runtime::spawn(async move {
         let _ = ASR_RUNTIME.prepare(Some(app)).await;
     });
@@ -345,6 +365,12 @@ pub fn prewarm_asr(app: tauri::AppHandle) {
 pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
+        let started = Instant::now();
+        log::info!(
+            "ASR file transcription started: path={} language={:?}",
+            audio_path,
+            language
+        );
         let input = AudioInput::FilePath(audio_path);
         let config = SttConfig {
             language,
@@ -357,6 +383,11 @@ pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<
             .await
             .map_err(|e| e.to_string())?;
 
+        log::info!(
+            "ASR file transcription finished in {}ms: chars={}",
+            started.elapsed().as_millis(),
+            result.text.chars().count()
+        );
         Ok(result.text)
     }
 
@@ -374,6 +405,12 @@ pub async fn transcribe_audio_data(
 ) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
+        let started = Instant::now();
+        log::info!(
+            "ASR audio-data transcription started: bytes={} language={:?}",
+            audio_data.len(),
+            language
+        );
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
@@ -405,9 +442,26 @@ pub async fn transcribe_audio_data(
         let cleanup_result = cleanup_temp_audio_file(&file_path);
 
         match (transcription_result, cleanup_result) {
-            (Ok(text), Ok(())) => Ok(text),
-            (Ok(_), Err(cleanup_err)) => Err(cleanup_err),
-            (Err(transcription_err), _) => Err(transcription_err),
+            (Ok(text), Ok(())) => {
+                log::info!(
+                    "ASR audio-data transcription finished in {}ms: chars={}",
+                    started.elapsed().as_millis(),
+                    text.chars().count()
+                );
+                Ok(text)
+            }
+            (Ok(_), Err(cleanup_err)) => {
+                log::warn!("ASR transcription succeeded but temp cleanup failed: {cleanup_err}");
+                Err(cleanup_err)
+            }
+            (Err(transcription_err), _) => {
+                log::error!(
+                    "ASR audio-data transcription failed after {}ms: {}",
+                    started.elapsed().as_millis(),
+                    transcription_err
+                );
+                Err(transcription_err)
+            }
         }
     }
 

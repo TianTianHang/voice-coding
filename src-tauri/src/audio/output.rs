@@ -77,10 +77,18 @@ pub struct AudioOutput {
 
 impl AudioOutput {
     pub fn new() -> Result<Self, AudioOutputError> {
+        log::info!("creating audio output stream");
         let host = cpal::default_host();
         let device = host
             .default_output_device()
             .ok_or(AudioOutputError::NoOutputDevice)?;
+        log::debug!(
+            "selected output device: {}",
+            device
+                .description()
+                .map(|description| description.name().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        );
 
         let mut supported = device
             .supported_output_configs()
@@ -100,6 +108,12 @@ impl AudioOutput {
             })?;
 
         let stream_config = supported.with_sample_rate(PLAYBACK_SAMPLE_RATE_HZ).config();
+        log::info!(
+            "output stream config selected: channels={} sample_rate={} buffer_size={:?}",
+            stream_config.channels,
+            stream_config.sample_rate,
+            stream_config.buffer_size
+        );
 
         let queue = Arc::new(Mutex::new(VecDeque::<f32>::new()));
         let queue_for_cb = queue.clone();
@@ -113,7 +127,9 @@ impl AudioOutput {
                         *sample = queue.pop_front().unwrap_or(0.0);
                     }
                 },
-                move |_| {},
+                move |err| {
+                    log::error!("output stream error: {err}");
+                },
                 None,
             )
             .map_err(|e| AudioOutputError::StreamBuild(e.to_string()))?;
@@ -122,6 +138,7 @@ impl AudioOutput {
             .play()
             .map_err(|e| AudioOutputError::StreamPlay(e.to_string()))?;
 
+        log::info!("audio output stream started");
         Ok(Self {
             _stream: stream,
             queue,
@@ -130,10 +147,16 @@ impl AudioOutput {
 
     pub fn enqueue(&self, buffer: PlaybackBuffer) {
         let mut queue = self.queue.lock();
+        log::debug!(
+            "enqueueing playback buffer: samples={} duration_ms={}",
+            buffer.samples().len(),
+            buffer.duration().as_millis()
+        );
         queue.extend(buffer.samples().iter().copied());
     }
 
     pub fn clear(&self) {
+        log::debug!("clearing audio output queue");
         self.queue.lock().clear();
     }
 }

@@ -116,11 +116,13 @@ fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     };
 
     let lib_path = format!("libs/{}/{}", platform, lib_name);
+    log::debug!("resolving VAD library: platform={platform} lib={lib_name}");
 
     // Try resource directory first (production build)
     if let Ok(resource_dir) = app.path().resource_dir() {
         let path = resource_dir.join(&lib_path);
         if path.exists() {
+            log::info!("resolved VAD library from resource dir: {}", path.display());
             return Ok(path);
         }
     }
@@ -128,6 +130,10 @@ fn get_vad_lib_path(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     // Fallback to development path
     let dev_path = std::path::PathBuf::from(&lib_path);
     if dev_path.exists() {
+        log::info!(
+            "resolved VAD library from development path: {}",
+            dev_path.display()
+        );
         return Ok(dev_path);
     }
 
@@ -154,6 +160,8 @@ async fn transcribe_audio_internal(
 ) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
+        let sample_count = audio_data.len();
+        log::info!("transcribing VAD utterance: samples={sample_count}");
         let input = vad_pcm_audio_input(audio_data);
         let config = stt_core::SttConfig {
             language: None,
@@ -166,6 +174,10 @@ async fn transcribe_audio_internal(
             .await
             .map_err(|e| e.to_string())?;
 
+        log::info!(
+            "VAD utterance transcription finished: chars={}",
+            result.text.chars().count()
+        );
         Ok(result.text)
     }
 
@@ -182,12 +194,14 @@ pub async fn start_listening(
     state: tauri::State<'_, VadRecorderState>,
     config_state: tauri::State<'_, VadRuntimeConfigState>,
 ) -> Result<(), String> {
+    log::info!("start_listening requested");
     let lib_path = get_vad_lib_path(&app)?;
 
     {
         let recorder = state.recorder.lock();
         let starting = state.starting.lock();
         if recorder.is_some() || *starting {
+            log::warn!("start_listening rejected because recorder is already active or starting");
             return Err("Already listening".into());
         }
     }
@@ -204,6 +218,11 @@ pub async fn start_listening(
     state.set_active_session(session_id);
 
     let runtime_config = config_state.get();
+    log::info!(
+        "VAD session starting: session_id={} threshold={}",
+        session_id,
+        runtime_config.threshold
+    );
     let vad_config = VadConfig {
         threshold: runtime_config.threshold,
         ..Default::default()
@@ -212,6 +231,7 @@ pub async fn start_listening(
     let recorder = match AudioRecorder::new(&lib_path, &vad_config) {
         Ok(recorder) => recorder,
         Err(err) => {
+            log::error!("failed to create audio recorder for session {session_id}: {err}");
             state.clear_active_session();
             let mut starting = state.starting.lock();
             *starting = false;
@@ -237,10 +257,12 @@ pub async fn start_listening(
 
     let app_clone = app.clone();
     tauri::async_runtime::spawn(async move {
+        log::debug!("VAD event task started: session_id={session_id}");
         while let Ok(event) = event_rx.recv() {
             match event {
                 crate::vad::VadEvent::StateChanged(s) => {
                     if is_session_active(&active_session, session_id) {
+                        log::debug!("VAD state event: session_id={session_id} state={s}");
                         let _ = app_clone.emit(
                             "vad-state",
                             serde_json::json!({ "state": s.to_string(), "sessionId": session_id }),
@@ -248,9 +270,19 @@ pub async fn start_listening(
                     }
                 }
                 crate::vad::VadEvent::SpeechDetected(audio_data) => {
+                    log::info!(
+                        "VAD speech detected: session_id={} samples={}",
+                        session_id,
+                        audio_data.len()
+                    );
                     match transcribe_audio_internal(app_clone.clone(), audio_data).await {
                         Ok(text) => {
                             if is_session_active(&active_session, session_id) {
+                                log::info!(
+                                    "emitting transcript: session_id={} chars={}",
+                                    session_id,
+                                    text.chars().count()
+                                );
                                 let prompt = text.clone();
                                 let _ = app_clone.emit(
                                     "transcript",
@@ -259,6 +291,11 @@ pub async fn start_listening(
                                 let runtime = app_clone.state::<crate::acp::AcpRuntime>();
                                 if let Err(e) = runtime.send_prompt(app_clone.clone(), prompt).await
                                 {
+                                    log::warn!(
+                                        "failed to send transcript to ACP agent: session_id={} error={}",
+                                        session_id,
+                                        e
+                                    );
                                     crate::acp::session::emit_agent_event(
                                         &app_clone,
                                         crate::acp::AgentEvent::error(format!(
@@ -270,6 +307,11 @@ pub async fn start_listening(
                         }
                         Err(e) => {
                             if is_session_active(&active_session, session_id) {
+                                log::error!(
+                                    "speech transcription failed: session_id={} error={}",
+                                    session_id,
+                                    e
+                                );
                                 let _ = app_clone.emit(
                                     "error",
                                     serde_json::json!({ "message": e, "sessionId": session_id }),
@@ -288,6 +330,7 @@ pub async fn start_listening(
                 }
                 crate::vad::VadEvent::Error(msg) => {
                     if is_session_active(&active_session, session_id) {
+                        log::error!("VAD event error: session_id={session_id} error={msg}");
                         let _ = app_clone.emit(
                             "error",
                             serde_json::json!({ "message": msg, "sessionId": session_id }),
@@ -314,6 +357,7 @@ pub async fn start_listening(
                 }
             }
         }
+        log::debug!("VAD event task finished: session_id={session_id}");
     });
 
     {
@@ -325,6 +369,7 @@ pub async fn start_listening(
         }
     }
 
+    log::info!("VAD session started: session_id={session_id}");
     Ok(())
 }
 
@@ -342,6 +387,7 @@ pub fn set_vad_config(
 ) -> Result<(), String> {
     validate_threshold(config.threshold)?;
 
+    log::info!("updating VAD config: threshold={}", config.threshold);
     state.set(config);
     Ok(())
 }
@@ -359,6 +405,7 @@ pub fn stop_listening(
     state: tauri::State<'_, VadRecorderState>,
 ) -> Result<(), String> {
     let stopped_session = state.clear_active_session();
+    log::info!("stop_listening requested: session_id={stopped_session:?}");
 
     let mut guard = state.recorder.lock();
     if let Some(recorder) = guard.take() {
@@ -368,6 +415,7 @@ pub fn stop_listening(
     }
 
     if let Some(session_id) = stopped_session {
+        log::info!("VAD session stopped: session_id={session_id}");
         let _ = app.emit(
             "vad-state",
             serde_json::json!({ "state": VadState::Idle.to_string(), "sessionId": session_id }),

@@ -73,9 +73,11 @@ impl AcpRuntime {
         profile: AgentProfile,
     ) -> Result<AgentStatus, String> {
         if self.active.lock().is_some() {
+            log::warn!("ACP connect rejected because an agent is already connected");
             return Err("An ACP agent is already connected".into());
         }
 
+        log::info!("connecting ACP agent: profile={}", profile.name);
         emit_agent_event(&app, AgentEvent::status("Connecting ACP agent"));
         let (transport, child) = spawn_sdk_transport(&profile)?;
         let child = Arc::new(AsyncMutex::new(child));
@@ -136,12 +138,22 @@ impl AcpRuntime {
         let status = self.status();
         emit_agent_status(&app, status.clone());
         emit_agent_event(&app, AgentEvent::status("ACP agent connected"));
+        log::info!(
+            "ACP agent connected: profile={:?} session_id={:?}",
+            status.profile_name,
+            status.session_id
+        );
         Ok(status)
     }
 
     pub async fn disconnect(&self, app: AppHandle) -> Result<AgentStatus, String> {
         let active = self.active.lock().take();
         if let Some(mut active) = active {
+            log::info!(
+                "disconnecting ACP agent: profile={} session_id={}",
+                active.profile.name,
+                active.session_id
+            );
             if let Some(shutdown_tx) = active.shutdown_tx.take() {
                 let _ = shutdown_tx.send(());
             }
@@ -153,10 +165,15 @@ impl AcpRuntime {
         let status = AgentStatus::disconnected();
         emit_agent_status(&app, status.clone());
         emit_agent_event(&app, AgentEvent::status("ACP agent disconnected"));
+        log::info!("ACP agent disconnected");
         Ok(status)
     }
 
     pub async fn send_prompt(&self, app: AppHandle, prompt: String) -> Result<(), String> {
+        log::info!(
+            "sending prompt to ACP agent: chars={}",
+            prompt.chars().count()
+        );
         let prompt_tx = {
             let active = self.active.lock();
             active
@@ -177,6 +194,7 @@ impl AcpRuntime {
             .map_err(|_| "ACP agent prompt worker stopped before responding".to_string())??;
 
         emit_agent_event(&app, AgentEvent::status("Sent current sentence to agent"));
+        log::info!("prompt sent to ACP agent");
         Ok(())
     }
 
@@ -185,6 +203,11 @@ impl AcpRuntime {
         confirmation_id: String,
         accepted: bool,
     ) -> Result<(), String> {
+        log::info!(
+            "responding to ACP confirmation: confirmation_id={} accepted={}",
+            confirmation_id,
+            accepted
+        );
         respond_pending_permission(&self.pending_permissions, &confirmation_id, accepted)
     }
 }
@@ -304,6 +327,7 @@ async fn run_sdk_connection(
                     .await?;
                 let session_id = session.session_id().to_string();
                 let (prompt_tx, prompt_rx) = mpsc::unbounded_channel();
+                log::info!("ACP session started: session_id={session_id}");
 
                 if let Some(tx) = ready_tx.lock().take() {
                     let _ = tx.send(Ok((session_id, prompt_tx)));
@@ -315,6 +339,7 @@ async fn run_sdk_connection(
         .await;
 
     if let Err(err) = result {
+        log::error!("ACP connection failed: {err}");
         if let Some(tx) = ready_tx.lock().take() {
             let _ = tx.send(Err(err.to_string()));
         }
@@ -330,6 +355,7 @@ fn reject_unsupported<T: JsonRpcResponse>(
     capability: &str,
 ) -> Result<(), agent_client_protocol::Error> {
     let message = format!("ACP client capability '{capability}' is not supported");
+    log::warn!("{message}");
     emit_agent_event(app, AgentEvent::error(message.clone()));
     responder.respond_with_internal_error(message)
 }
@@ -341,11 +367,16 @@ async fn run_prompt_worker(
     mut prompt_rx: mpsc::UnboundedReceiver<PromptCommand>,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), agent_client_protocol::Error> {
+    log::debug!("ACP prompt worker started");
     loop {
         tokio::select! {
-            _ = &mut shutdown_rx => return Ok(()),
+            _ = &mut shutdown_rx => {
+                log::debug!("ACP prompt worker received shutdown");
+                return Ok(());
+            },
             command = prompt_rx.recv() => {
                 let Some(command) = command else {
+                    log::debug!("ACP prompt worker channel closed");
                     return Ok(());
                 };
                 let result = send_prompt_and_wait(&app, &result_tracker, &mut session, command.prompt).await;
@@ -363,10 +394,11 @@ async fn send_prompt_and_wait(
 ) -> Result<(), agent_client_protocol::Error> {
     result_tracker.clear();
     session.send_prompt(prompt_with_tts_contract(&prompt))?;
+    log::debug!("ACP prompt dispatched; waiting for stop reason");
     loop {
         match session.read_update().await? {
             agent_client_protocol::SessionMessage::StopReason(_) => {
-                eprintln!("[acp] StopReason received; scheduling auto TTS");
+                log::info!("ACP stop reason received; scheduling auto TTS");
                 trigger_auto_tts_for_latest_result(app.clone(), result_tracker.clone());
                 return Ok(());
             }
@@ -392,11 +424,10 @@ fn trigger_auto_tts_for_latest_result(app: AppHandle, result_tracker: AgentResul
         };
 
         let runtime = app.state::<crate::tts::TtsRuntime>();
-        eprintln!(
-            "[auto-tts] latest result selected id={} len={} content={:?}",
+        log::debug!(
+            "auto TTS latest ACP result selected: id={} len={}",
             result.id,
-            result.content.len(),
-            result.content
+            result.content.len()
         );
         if result.content.trim().is_empty() {
             runtime.skip_auto_tts_missing_result(
@@ -422,8 +453,8 @@ async fn wait_for_complete_latest_result(
     for _ in 0..ATTEMPTS {
         if let Some(current) = result_tracker.latest() {
             let readiness = agent_tts_readiness(&current.content);
-            eprintln!(
-                "[auto-tts] wait latest id={} len={} readiness={:?}",
+            log::debug!(
+                "waiting for complete auto TTS result: id={} len={} readiness={:?}",
                 current.id,
                 current.content.len(),
                 readiness
@@ -433,15 +464,15 @@ async fn wait_for_complete_latest_result(
                 AgentTtsReadiness::Complete => return Some(current),
                 AgentTtsReadiness::Pending => {}
                 AgentTtsReadiness::Invalid(reason) => {
-                    eprintln!("[auto-tts] latest result has invalid TTS tag: {reason}");
+                    log::debug!("latest auto TTS result has invalid TTS tag: {reason}");
                     return Some(current);
                 }
             }
         }
         sleep(DELAY).await;
     }
-    eprintln!(
-        "[auto-tts] timed out waiting for complete latest result; using last_seen={}",
+    log::debug!(
+        "timed out waiting for complete auto TTS result; using last_seen={}",
         latest_seen.is_some()
     );
     latest_seen

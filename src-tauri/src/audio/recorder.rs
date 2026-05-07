@@ -44,6 +44,13 @@ pub struct AudioRecorder {
 
 impl AudioRecorder {
     pub fn new(lib_path: &std::path::Path, config: &VadConfig) -> Result<Self, RecorderError> {
+        log::info!(
+            "creating audio recorder: vad_lib={} sample_rate={} hop_size={} threshold={}",
+            lib_path.display(),
+            config.sample_rate,
+            config.hop_size,
+            config.threshold
+        );
         let vad_engine = VadEngine::new(lib_path, config.hop_size as i32, config.threshold)?;
 
         let (event_tx, event_rx): (Sender<VadEvent>, Receiver<VadEvent>) = unbounded();
@@ -55,6 +62,13 @@ impl AudioRecorder {
         let device = host
             .default_input_device()
             .ok_or(RecorderError::NoInputDevice)?;
+        log::debug!(
+            "selected input device: {}",
+            device
+                .description()
+                .map(|description| description.name().to_string())
+                .unwrap_or_else(|_| "unknown".to_string())
+        );
 
         let supported_config = device
             .supported_input_configs()
@@ -73,6 +87,12 @@ impl AudioRecorder {
             .config();
 
         let channels = stream_config.channels as usize;
+        log::info!(
+            "input stream config selected: channels={} sample_rate={} buffer_size={:?}",
+            stream_config.channels,
+            stream_config.sample_rate,
+            stream_config.buffer_size
+        );
 
         let hop_size = config.hop_size;
         let mut frame_buffer: Vec<i16> = Vec::with_capacity(hop_size * 4);
@@ -100,6 +120,7 @@ impl AudioRecorder {
                     }
                 },
                 move |err: cpal::StreamError| {
+                    log::error!("input stream error: {err}");
                     let _ = error_tx.send(VadEvent::Error(err.to_string()));
                 },
                 None,
@@ -110,6 +131,7 @@ impl AudioRecorder {
             .play()
             .map_err(|e| RecorderError::StreamPlay(e.to_string()))?;
 
+        log::info!("audio recorder started");
         Ok(Self {
             _stream: stream,
             state_machine,

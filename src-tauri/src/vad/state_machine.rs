@@ -50,6 +50,7 @@ impl VadStateMachine {
     }
 
     pub fn start(&mut self) {
+        log::debug!("VAD state transition: {:?} -> Listening", self.state);
         self.state = VadState::Listening;
         self.buffer.clear();
         self.silence_counter = 0;
@@ -59,6 +60,7 @@ impl VadStateMachine {
     }
 
     pub fn stop(&mut self) {
+        log::debug!("VAD state transition: {:?} -> Idle", self.state);
         self.state = VadState::Idle;
         self.buffer.clear();
         self.silence_counter = 0;
@@ -70,6 +72,7 @@ impl VadStateMachine {
             VadState::Idle | VadState::Processing => {}
             VadState::Listening => {
                 if is_speech {
+                    log::debug!("VAD speech started");
                     self.state = VadState::Recording;
                     self.buffer.clear();
                     self.buffer.extend_from_slice(audio);
@@ -92,6 +95,7 @@ impl VadStateMachine {
                     self.silence_counter += 1;
                     if self.silence_counter >= SILENCE_FRAMES {
                         let audio_data = std::mem::take(&mut self.buffer);
+                        log::debug!("VAD speech ended: samples={}", audio_data.len());
                         self.silence_counter = 0;
                         self.state = VadState::Processing;
                         let _ = self
@@ -99,8 +103,16 @@ impl VadStateMachine {
                             .send(VadEvent::StateChanged(VadState::Processing));
 
                         if audio_data.len() >= MIN_RECORDING_SAMPLES {
+                            log::info!(
+                                "VAD utterance ready for transcription: samples={}",
+                                audio_data.len()
+                            );
                             let _ = self.event_tx.send(VadEvent::SpeechDetected(audio_data));
                         } else {
+                            log::debug!(
+                                "VAD utterance ignored because it is too short: samples={}",
+                                audio_data.len()
+                            );
                             self.state = VadState::Listening;
                             let _ = self
                                 .event_tx
@@ -113,6 +125,7 @@ impl VadStateMachine {
     }
 
     pub fn finish_transcription(&mut self) {
+        log::debug!("VAD transcription finished; returning to listening");
         self.state = VadState::Listening;
         self.buffer.clear();
         self.silence_counter = 0;
