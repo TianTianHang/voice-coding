@@ -16,6 +16,7 @@ use tts_core::{
 };
 
 mod text;
+mod robust;
 
 use text::{MossTextPreprocessor, PreparedTextChunk};
 

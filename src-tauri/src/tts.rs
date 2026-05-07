@@ -449,19 +449,23 @@ impl TtsRuntime {
         content: String,
         force: bool,
     ) -> Result<AutoTtsStatusSnapshot, String> {
-        let text = content.trim().to_string();
-        if text.is_empty() {
+        let raw_text = content.trim().to_string();
+        if raw_text.is_empty() {
+            return Ok(self.emit_auto_state(Some(&app)));
+        }
+        let speakable_text = prepare_agent_result_for_speech(&raw_text);
+        if speakable_text.is_empty() {
             return Ok(self.emit_auto_state(Some(&app)));
         }
 
         let key = if force {
-            result_key_or_id.unwrap_or_else(|| auto_tts_result_key(None, &text))
+            result_key_or_id.unwrap_or_else(|| auto_tts_result_key(None, &raw_text))
         } else {
-            auto_tts_result_key(result_key_or_id.as_deref(), &text)
+            auto_tts_result_key(result_key_or_id.as_deref(), &raw_text)
         };
         {
             let mut inner = self.inner.lock();
-            inner.auto.latest_result_text = Some(text.clone());
+            inner.auto.latest_result_text = Some(raw_text.clone());
             inner.auto.latest_result_key = Some(key.clone());
 
             if !inner.auto.enabled && !force {
@@ -483,7 +487,7 @@ impl TtsRuntime {
         self.emit_auto_state(Some(&app));
 
         let result = async {
-            self.synthesize(Some(&app), text, TtsConfig::default())
+            self.synthesize(Some(&app), speakable_text, TtsConfig::default())
                 .await?;
             self.play_buffered(
                 app.clone(),
@@ -517,6 +521,95 @@ pub(crate) fn auto_tts_result_key(result_id: Option<&str>, content: &str) -> Str
         Some(id) if !id.is_empty() => format!("{id}:{normalized}"),
         _ => normalized,
     }
+}
+
+pub(crate) fn prepare_agent_result_for_speech(content: &str) -> String {
+    let mut prepared = Vec::new();
+    let mut in_fence = false;
+    let mut skipped_fence = false;
+    let mut skipped_technical_block = false;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.starts_with("```") || line.starts_with("~~~") {
+            if !in_fence {
+                skipped_fence = true;
+            }
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        if line.is_empty() {
+            prepared.push(String::new());
+            continue;
+        }
+        if is_diff_line(line)
+            || is_terminal_log_line(line)
+            || is_command_heavy_line(line)
+            || is_long_json_line(line)
+        {
+            skipped_technical_block = true;
+            continue;
+        }
+        prepared.push(line.to_string());
+    }
+
+    let mut text = prepared.join("\n");
+    if skipped_fence || skipped_technical_block {
+        let label = if skipped_fence {
+            "包含一段代码或技术输出。"
+        } else {
+            "省略一段技术输出。"
+        };
+        if text.trim().is_empty() {
+            text = label.to_string();
+        } else {
+            text.push('\n');
+            text.push_str(label);
+        }
+    }
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn is_diff_line(line: &str) -> bool {
+    line.starts_with("diff --git")
+        || line.starts_with("@@")
+        || line.starts_with("+++ ")
+        || line.starts_with("--- ")
+        || line.starts_with("+ ")
+}
+
+fn is_terminal_log_line(line: &str) -> bool {
+    line.starts_with('$')
+        || line.starts_with('>')
+        || line.starts_with("error:")
+        || line.starts_with("warning:")
+        || line.contains("Finished `")
+        || line.contains("Compiling ")
+}
+
+fn is_command_heavy_line(line: &str) -> bool {
+    let command_markers = [
+        "nix develop",
+        "cargo test",
+        "pnpm ",
+        "npm ",
+        "git ",
+        "python ",
+    ];
+    let marker_count = command_markers
+        .iter()
+        .filter(|marker| line.contains(*marker))
+        .count();
+    marker_count >= 2 || (marker_count == 1 && line.len() > 100)
+}
+
+fn is_long_json_line(line: &str) -> bool {
+    line.len() > 120
+        && ((line.starts_with('{') && line.ends_with('}'))
+            || (line.starts_with('[') && line.ends_with(']')))
 }
 
 #[cfg(feature = "tts-moss-onnx")]
@@ -847,5 +940,45 @@ mod tests {
             Some("result-1:Done")
         );
         assert_eq!(status.last_status, AutoTtsLastStatus::SkippedDuplicate);
+    }
+
+    #[test]
+    fn prepares_agent_result_for_speech_without_mutating_raw_key_source() {
+        let raw = r#"已完成：
+- 修改 `src-tauri/tts-moss/src/text.rs`
+- 运行 `nix develop -c cargo test -p tts-moss`
+
+```rust
+fn main() {}
+```
+
+保留解释文字。"#;
+
+        let prepared = prepare_agent_result_for_speech(raw);
+
+        assert!(prepared.contains("已完成"));
+        assert!(prepared.contains("保留解释文字"));
+        assert!(prepared.contains("包含一段代码或技术输出"));
+        assert!(!prepared.contains("fn main"));
+        assert_eq!(
+            auto_tts_result_key(Some("result-1"), raw),
+            format!(
+                "result-1:{}",
+                raw.split_whitespace().collect::<Vec<_>>().join(" ")
+            )
+        );
+    }
+
+    #[test]
+    fn prepares_agent_result_by_skipping_logs_json_and_command_heavy_lines() {
+        let raw = r#"总结如下：
+$ cargo test -p tts-moss
+{"very":"long","payload":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+warning: noisy terminal output
+自然语言结论。"#;
+
+        let prepared = prepare_agent_result_for_speech(raw);
+
+        assert_eq!(prepared, "总结如下： 自然语言结论。 省略一段技术输出。");
     }
 }

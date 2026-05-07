@@ -1,3 +1,5 @@
+use crate::robust::normalize_robust_text;
+
 const DEFAULT_MAX_TOKENS_PER_CHUNK: usize = 180;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,35 +47,25 @@ impl MossTextPreprocessor {
         }
 
         let mut chunks = Vec::new();
-        let mut current = String::new();
-        for segment in natural_segments(&normalized) {
-            let candidate = join_segment(&current, segment);
-            if encode(&candidate)?.len() <= self.max_tokens_per_chunk {
-                current = candidate;
-                continue;
-            }
-
-            push_encoded(&mut chunks, &mut encode, &current)?;
-            current.clear();
-
-            let segment_tokens = encode(segment)?;
-            if segment_tokens.len() <= self.max_tokens_per_chunk {
-                current.push_str(segment.trim());
+        for sentence in sentence_segments(&normalized) {
+            let token_ids = encode(sentence)?;
+            if token_ids.len() <= self.max_tokens_per_chunk {
+                push_preencoded(&mut chunks, sentence, token_ids);
             } else {
-                split_oversized_segment(
-                    segment,
+                split_oversized_sentence(
+                    sentence,
                     self.max_tokens_per_chunk,
                     &mut encode,
                     &mut chunks,
                 )?;
             }
         }
-        push_encoded(&mut chunks, &mut encode, &current)?;
         Ok(chunks)
     }
 }
 
 fn normalize_tts_text(text: &str) -> String {
+    let text = normalize_robust_text(text);
     let mut normalized = String::with_capacity(text.len());
     let mut last_was_space = true;
 
@@ -115,7 +107,12 @@ fn normalize_tts_text(text: &str) -> String {
         output.push(ch);
         previous = Some(ch);
     }
-    ensure_terminal_sentence_punctuation(output)
+    let output = ensure_terminal_sentence_punctuation(output);
+    if has_speakable_content(&output) {
+        output
+    } else {
+        String::new()
+    }
 }
 
 fn normalize_char(ch: char) -> char {
@@ -138,11 +135,60 @@ fn normalize_char(ch: char) -> char {
     }
 }
 
-fn natural_segments(text: &str) -> Vec<&str> {
+fn sentence_segments(text: &str) -> Vec<&str> {
     let mut segments = Vec::new();
     let mut start = 0;
     for (index, ch) in text.char_indices() {
-        if is_boundary(ch) {
+        if is_sentence_boundary(ch) {
+            let end = index + ch.len_utf8();
+            segments.push(text[start..end].trim());
+            start = end;
+        }
+    }
+    if start < text.len() {
+        segments.push(text[start..].trim());
+    }
+    segments
+        .into_iter()
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn split_oversized_sentence<F, E>(
+    sentence: &str,
+    max_tokens: usize,
+    encode: &mut F,
+    chunks: &mut Vec<PreparedTextChunk>,
+) -> Result<(), E>
+where
+    F: FnMut(&str) -> Result<Vec<i64>, E>,
+{
+    let mut current = String::new();
+    for segment in soft_segments(sentence) {
+        let candidate = join_segment(&current, segment);
+        if !candidate.trim().is_empty() && encode(&candidate)?.len() <= max_tokens {
+            current = candidate;
+            continue;
+        }
+
+        push_encoded(chunks, encode, &current)?;
+        current.clear();
+
+        let segment_tokens = encode(segment)?;
+        if segment_tokens.len() <= max_tokens {
+            current.push_str(segment.trim());
+        } else {
+            split_oversized_segment(segment, max_tokens, encode, chunks)?;
+        }
+    }
+    push_encoded(chunks, encode, &current)
+}
+
+fn soft_segments(text: &str) -> Vec<&str> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    for (index, ch) in text.char_indices() {
+        if is_soft_boundary(ch) || is_sentence_boundary(ch) {
             let end = index + ch.len_utf8();
             segments.push(text[start..end].trim());
             start = end;
@@ -201,6 +247,17 @@ where
     Ok(())
 }
 
+fn push_preencoded(chunks: &mut Vec<PreparedTextChunk>, text: &str, token_ids: Vec<i64>) {
+    let text = text.trim();
+    if text.is_empty() || token_ids.is_empty() {
+        return;
+    }
+    chunks.push(PreparedTextChunk {
+        text: text.to_string(),
+        token_ids,
+    });
+}
+
 fn join_segment(current: &str, segment: &str) -> String {
     let segment = segment.trim();
     if current.is_empty() {
@@ -210,23 +267,17 @@ fn join_segment(current: &str, segment: &str) -> String {
     }
 }
 
-fn is_boundary(ch: char) -> bool {
+fn is_sentence_boundary(ch: char) -> bool {
     matches!(
         ch,
-        '.' | '!'
-            | '?'
-            | ','
-            | ';'
-            | ':'
-            | '\n'
-            | '\r'
-            | '\u{3002}'
-            | '\u{ff01}'
-            | '\u{ff1f}'
-            | '\u{ff0c}'
-            | '\u{3001}'
-            | '\u{ff1b}'
-            | '\u{ff1a}'
+        '.' | '!' | '?' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}'
+    )
+}
+
+fn is_soft_boundary(ch: char) -> bool {
+    matches!(
+        ch,
+        ',' | ';' | ':' | '\n' | '\r' | '\u{ff0c}' | '\u{3001}' | '\u{ff1b}' | '\u{ff1a}'
     )
 }
 
@@ -261,6 +312,10 @@ fn is_cjk(ch: char) -> bool {
     )
 }
 
+fn has_speakable_content(text: &str) -> bool {
+    text.chars().any(|ch| ch.is_alphanumeric() || is_cjk(ch))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +330,7 @@ mod tests {
 
         assert_eq!(
             prep.normalize("  你好   World１２３ ，  ready？\nOK  "),
-            "你好 World123, ready? OK。"
+            "你好 World123, ready?。OK。"
         );
     }
 
@@ -290,16 +345,54 @@ mod tests {
     }
 
     #[test]
-    fn chunks_by_token_budget_on_natural_boundaries() {
-        let prep = MossTextPreprocessor::new(12);
+    fn chunks_one_sentence_per_synthesis_chunk() {
+        let prep = MossTextPreprocessor::new(100);
 
         let chunks = prep
             .prepare("第一句很短。 第二句也短。 third sentence.", char_tokens)
             .unwrap();
 
-        assert!(chunks.len() > 1);
-        assert!(chunks.iter().all(|chunk| chunk.token_ids.len() <= 12));
-        assert!(chunks[0].text.ends_with('\u{3002}'));
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["第一句很短。", "第二句也短。", "third sentence."]
+        );
+    }
+
+    #[test]
+    fn keeps_soft_boundaries_inside_normal_length_sentence() {
+        let prep = MossTextPreprocessor::new(100);
+
+        let chunks = prep
+            .prepare("第一段,包含逗号:但仍然是一句。第二句。", char_tokens)
+            .unwrap();
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["第一段,包含逗号:但仍然是一句。", "第二句。"]
+        );
+    }
+
+    #[test]
+    fn splits_oversized_sentence_on_soft_boundaries() {
+        let prep = MossTextPreprocessor::new(8);
+
+        let chunks = prep
+            .prepare("第一段,第二段,第三段。", char_tokens)
+            .unwrap();
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["第一段,", "第二段,", "第三段。"]
+        );
     }
 
     #[test]
@@ -315,5 +408,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["abc", "def", "\u{3002}"]
         );
+    }
+
+    #[test]
+    fn symbol_only_text_normalizes_to_empty() {
+        let prep = MossTextPreprocessor::default();
+
+        assert_eq!(prep.normalize("```---!!!```"), "");
+        assert!(prep.prepare(" -> --- !!! ", char_tokens).unwrap().is_empty());
     }
 }
