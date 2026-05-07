@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useBackendVAD, type VADState } from "../hooks/useBackendVAD";
 import {
   asrStatusLabel,
@@ -16,11 +17,7 @@ import { AgentEventStream } from "./AgentEventStream";
 import { AudioVisualizer } from "./AudioVisualizer";
 import { ControlButton } from "./ControlButton";
 
-type VadRuntimeConfig = {
-  threshold: number;
-};
-
-type TtsStatusSnapshot = {
+export type TtsStatusSnapshot = {
   state: "idle" | "synthesizing" | "ready" | "playing" | "failed";
   engineName: string;
   model: ModelPathSnapshot;
@@ -28,7 +25,7 @@ type TtsStatusSnapshot = {
   hasBufferedAudio: boolean;
 };
 
-type AutoTtsStatusSnapshot = {
+export type AutoTtsStatusSnapshot = {
   enabled: boolean;
   isPlaying: boolean;
   latestResultText?: string;
@@ -173,16 +170,8 @@ export function AssistantConsole() {
   );
   const [wakeDetected, setWakeDetected] = useState(false);
   const [timelineExpanded, setTimelineExpanded] = useState(false);
-  const [vadThresholdInput, setVadThresholdInput] = useState("0.5");
-  const [vadConfigMessage, setVadConfigMessage] = useState<string | null>(null);
-  const [isSavingVadConfig, setIsSavingVadConfig] = useState(false);
-  const [ttsText, setTtsText] = useState("你好。");
-  const [ttsStatus, setTtsStatus] = useState<TtsStatusSnapshot | null>(null);
   const [autoTtsStatus, setAutoTtsStatus] = useState<AutoTtsStatusSnapshot | null>(null);
-  const [ttsMessage, setTtsMessage] = useState<string | null>(null);
-  const [isSynthesizingTts, setIsSynthesizingTts] = useState(false);
-  const [isPlayingTts, setIsPlayingTts] = useState(false);
-  const [isUpdatingAutoTts, setIsUpdatingAutoTts] = useState(false);
+  const [debugWindowMessage, setDebugWindowMessage] = useState<string | null>(null);
   const {
     state,
     transcript,
@@ -199,33 +188,7 @@ export function AssistantConsole() {
   useEffect(() => {
     let active = true;
 
-    async function loadRuntimeConfig() {
-      try {
-        const config = await invoke<VadRuntimeConfig>("get_vad_config");
-        if (!active) {
-          return;
-        }
-        setVadThresholdInput(config.threshold.toString());
-      } catch {
-        if (!active) {
-          return;
-        }
-        setVadConfigMessage("Failed to load VAD threshold.");
-      }
-
-      try {
-        const status = await invoke<TtsStatusSnapshot>("get_tts_status");
-        if (!active) {
-          return;
-        }
-        setTtsStatus(status);
-      } catch {
-        if (!active) {
-          return;
-        }
-        setTtsMessage("Failed to load TTS status.");
-      }
-
+    async function loadAutoTtsStatus() {
       try {
         const status = await invoke<AutoTtsStatusSnapshot>("get_auto_tts_status");
         if (!active) {
@@ -236,11 +199,10 @@ export function AssistantConsole() {
         if (!active) {
           return;
         }
-        setTtsMessage("Failed to load auto speech status.");
       }
     }
 
-    void loadRuntimeConfig();
+    void loadAutoTtsStatus();
 
     return () => {
       active = false;
@@ -253,7 +215,6 @@ export function AssistantConsole() {
     async function setupAutoTtsEvents() {
       unlisten = await listen<AutoTtsStatusSnapshot>("auto-tts-state", (event) => {
         setAutoTtsStatus(event.payload);
-        setTtsStatus(event.payload.tts);
       });
     }
 
@@ -331,113 +292,32 @@ export function AssistantConsole() {
     }
   }
 
-  async function applyVadThreshold() {
-    const parsed = Number(vadThresholdInput);
-    if (!Number.isFinite(parsed)) {
-      setVadConfigMessage("Threshold must be a number between 0.0 and 1.0.");
-      return;
-    }
-
-    setIsSavingVadConfig(true);
-    setVadConfigMessage(null);
+  async function openDebugToolsWindow() {
+    setDebugWindowMessage(null);
     try {
-      await invoke("set_vad_config", {
-        config: { threshold: parsed },
+      const existing = await WebviewWindow.getByLabel("debug-tools");
+      if (existing) {
+        await existing.show();
+        await existing.setFocus();
+        return;
+      }
+
+      const debugWindow = new WebviewWindow("debug-tools", {
+        title: "Voice Debug Tools",
+        url: "/?window=debug-tools",
+        width: 520,
+        height: 700,
+        minWidth: 380,
+        minHeight: 560,
+        center: true,
+        focus: true,
       });
-      setVadConfigMessage(`Saved threshold ${parsed.toFixed(3)}. Takes effect next Start.`);
-    } catch (error) {
-      setVadConfigMessage(String(error));
-    } finally {
-      setIsSavingVadConfig(false);
-    }
-  }
 
-  async function synthesizeTts() {
-    const text = ttsText.trim();
-    if (!text) {
-      setTtsMessage("TTS text must not be empty.");
-      return;
-    }
-
-    setIsSynthesizingTts(true);
-    setTtsMessage(null);
-    try {
-      const status = await invoke<TtsStatusSnapshot>("synthesize_tts", { text });
-      setTtsStatus(status);
-      setTtsMessage(status.hasBufferedAudio ? "Audio generated and ready to play." : "Synthesis finished without buffered audio.");
+      debugWindow.once("tauri://error", (event) => {
+        setDebugWindowMessage(String(event.payload));
+      });
     } catch (error) {
-      setTtsMessage(String(error));
-      setTtsStatus((current) => current ? { ...current, state: "failed", error: String(error) } : null);
-    } finally {
-      setIsSynthesizingTts(false);
-    }
-  }
-
-  async function playTts() {
-    setIsPlayingTts(true);
-    setTtsMessage(null);
-    try {
-      const status = await invoke<TtsStatusSnapshot>("play_tts");
-      setTtsStatus(status);
-      setTtsMessage("Playback finished.");
-    } catch (error) {
-      setTtsMessage(String(error));
-      setTtsStatus((current) => current ? { ...current, state: "failed", error: String(error) } : null);
-    } finally {
-      setIsPlayingTts(false);
-    }
-  }
-
-  async function cancelTtsPlayback() {
-    setTtsMessage(null);
-    try {
-      const status = await invoke<TtsStatusSnapshot>("cancel_tts_playback");
-      setTtsStatus(status);
-      setTtsMessage("Playback cancelled.");
-    } catch (error) {
-      setTtsMessage(String(error));
-    }
-  }
-
-  async function setAutoTtsEnabled(enabled: boolean) {
-    setIsUpdatingAutoTts(true);
-    setTtsMessage(null);
-    try {
-      const status = await invoke<AutoTtsStatusSnapshot>("set_auto_tts_enabled", { enabled });
-      setAutoTtsStatus(status);
-      setTtsStatus(status.tts);
-    } catch (error) {
-      setTtsMessage(String(error));
-    } finally {
-      setIsUpdatingAutoTts(false);
-    }
-  }
-
-  async function stopAutoTts() {
-    setIsUpdatingAutoTts(true);
-    setTtsMessage(null);
-    try {
-      const status = await invoke<AutoTtsStatusSnapshot>("stop_auto_tts");
-      setAutoTtsStatus(status);
-      setTtsStatus(status.tts);
-    } catch (error) {
-      setTtsMessage(String(error));
-    } finally {
-      setIsUpdatingAutoTts(false);
-    }
-  }
-
-  async function speakLatestResult() {
-    setIsUpdatingAutoTts(true);
-    setTtsMessage(null);
-    try {
-      const status = await invoke<AutoTtsStatusSnapshot>("speak_latest_result");
-      setAutoTtsStatus(status);
-      setTtsStatus(status.tts);
-    } catch (error) {
-      setTtsMessage(String(error));
-    } finally {
-      setIsUpdatingAutoTts(false);
+      setDebugWindowMessage(String(error));
     }
   }
 
@@ -557,125 +437,20 @@ export function AssistantConsole() {
               </div>
             </section>
 
-            <section className="mt-4 border-t border-slate-200 pt-4" aria-label="Developer VAD controls">
+            <section className="mt-4 border-t border-slate-200 pt-4" aria-label="Developer tools">
               <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
-                Dev · VAD Threshold
+                Debug
               </div>
               <div className="grid gap-2">
-                <div className="flex items-center gap-2">
-                  <input
-                    className="min-h-10 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
-                    type="number"
-                    min={0}
-                    max={1}
-                    step={0.01}
-                    value={vadThresholdInput}
-                    onChange={(event) => setVadThresholdInput(event.target.value)}
-                    placeholder="0.0 - 1.0"
-                  />
-                  <button
-                    className="min-h-10 shrink-0 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={applyVadThreshold}
-                    disabled={isSavingVadConfig}
-                    type="button"
-                  >
-                    {isSavingVadConfig ? "Saving..." : "Apply"}
-                  </button>
-                </div>
-                <p className="text-xs text-slate-600">Lower is more sensitive; higher is stricter.</p>
-                {vadConfigMessage && (
-                  <p className="text-xs font-semibold text-slate-700">{vadConfigMessage}</p>
-                )}
-              </div>
-            </section>
-
-            <section className="mt-4 border-t border-slate-200 pt-4" aria-label="Developer TTS controls">
-              <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
-                Auto Speech
-              </div>
-              <div className="mb-4 grid gap-2">
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    className={`min-h-10 cursor-pointer rounded-lg border px-3 text-sm font-extrabold transition-colors duration-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60 ${
-                      autoTtsStatus?.enabled
-                        ? "border-slate-950 bg-slate-950 text-white"
-                        : "border-slate-300 bg-white text-slate-800 hover:bg-slate-50"
-                    }`}
-                    onClick={() => setAutoTtsEnabled(!autoTtsStatus?.enabled)}
-                    disabled={isUpdatingAutoTts}
-                    type="button"
-                  >
-                    {autoTtsStatus?.enabled ? "Auto On" : "Auto Off"}
-                  </button>
-                  <button
-                    className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={speakLatestResult}
-                    disabled={isUpdatingAutoTts || !autoTtsStatus?.latestResultText}
-                    type="button"
-                  >
-                    Replay
-                  </button>
-                </div>
                 <button
-                  className="min-h-10 cursor-pointer rounded-lg border border-rose-300 bg-rose-50 px-3 text-sm font-extrabold text-rose-800 transition-colors duration-200 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-900 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={stopAutoTts}
-                  disabled={isUpdatingAutoTts || !autoTtsStatus?.isPlaying}
+                  className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={openDebugToolsWindow}
                   type="button"
                 >
-                  Stop Auto Speech
+                  Open Debug Tools
                 </button>
-                <p className="text-xs text-slate-600">
-                  {autoTtsStatusLabel(autoTtsStatus)}
-                </p>
-              </div>
-
-              <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
-                Dev · TTS Test
-              </div>
-              <div className="grid gap-2">
-                <textarea
-                  className="min-h-20 resize-y rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
-                  value={ttsText}
-                  onChange={(event) => setTtsText(event.target.value)}
-                  placeholder="Text to synthesize"
-                />
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={synthesizeTts}
-                    disabled={isSynthesizingTts || isPlayingTts}
-                    type="button"
-                  >
-                    {isSynthesizingTts ? "Generating..." : "Generate"}
-                  </button>
-                  <button
-                    className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-                    onClick={playTts}
-                    disabled={isSynthesizingTts || isPlayingTts || !ttsStatus?.hasBufferedAudio}
-                    type="button"
-                  >
-                    {isPlayingTts ? "Playing..." : "Play"}
-                  </button>
-                </div>
-                {isPlayingTts && (
-                  <button
-                    className="min-h-10 cursor-pointer rounded-lg border border-rose-300 bg-rose-50 px-3 text-sm font-extrabold text-rose-800 transition-colors duration-200 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-900"
-                    onClick={cancelTtsPlayback}
-                    type="button"
-                  >
-                    Stop Playback
-                  </button>
-                )}
-                <p className="text-xs text-slate-600">
-                  Status: {ttsStatus ? `${ttsStatus.state}${ttsStatus.hasBufferedAudio ? " · buffered" : ""}` : "unknown"}
-                </p>
-                {ttsStatus && (
-                  <p className="text-xs text-slate-600">
-                    Engine: {ttsStatus.engineName} · Model: {ttsStatus.model.modelDir || "unresolved"}
-                  </p>
-                )}
-                {(ttsMessage || ttsStatus?.error) && (
-                  <p className="text-xs font-semibold text-slate-700">{ttsMessage || ttsStatus?.error}</p>
+                {debugWindowMessage && (
+                  <p className="text-xs font-semibold text-slate-700">{debugWindowMessage}</p>
                 )}
               </div>
             </section>

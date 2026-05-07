@@ -135,6 +135,18 @@
   padding: 1rem;
 }
 
+.debug-window {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+}
+
+.debug-panel {
+  border: 1px solid #e2e8f0;
+  border-radius: var(--voice-radius);
+  background: #f8fafc;
+  padding: 1rem;
+}
+
 .status-row {
   display: grid;
   grid-template-columns: 10px minmax(0, 1fr);
