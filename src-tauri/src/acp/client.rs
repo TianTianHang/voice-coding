@@ -103,13 +103,32 @@ pub struct TrackedAgentResult {
 }
 
 impl AgentResultTracker {
+    pub fn clear(&self) {
+        *self.latest.lock() = None;
+    }
+
     pub fn observe(&self, event: &AgentEvent) {
         if event.kind != AgentEventKind::Result {
             return;
         }
 
-        let result_id = event.message_id.clone().unwrap_or_else(|| event.id.clone());
         let mut latest = self.latest.lock();
+        if event.message_id.is_none() && event.operation == Some(AgentEventOperation::Append) {
+            match latest.as_mut() {
+                Some(current) => {
+                    current.content = merge_append_text(&current.content, &event.content);
+                }
+                None => {
+                    *latest = Some(TrackedAgentResult {
+                        id: event.id.clone(),
+                        content: event.content.clone(),
+                    });
+                }
+            }
+            return;
+        }
+
+        let result_id = event.message_id.clone().unwrap_or_else(|| event.id.clone());
         match latest.as_mut() {
             Some(current) if current.id == result_id => {
                 current.content = merge_append_text(&current.content, &event.content);
@@ -688,6 +707,21 @@ mod tests {
 
         tracker.observe(&second);
         assert_eq!(tracker.latest().unwrap().content, "hello");
+    }
+
+    #[test]
+    fn result_tracker_merges_append_chunks_without_message_id() {
+        let tracker = AgentResultTracker::default();
+        for chunk in ["<", "tt", "s", ">", "Ready", "</", "tt", "s", ">"] {
+            let event = AgentEvent::new(AgentEventKind::Result, None, chunk, None)
+                .with_operation(AgentEventOperation::Append);
+            tracker.observe(&event);
+        }
+
+        assert_eq!(tracker.latest().unwrap().content, "<tts>Ready</tts>");
+
+        tracker.clear();
+        assert!(tracker.latest().is_none());
     }
 
     #[test]

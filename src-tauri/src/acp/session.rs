@@ -361,6 +361,7 @@ async fn send_prompt_and_wait(
     session: &mut agent_client_protocol::ActiveSession<'static, Agent>,
     prompt: String,
 ) -> Result<(), agent_client_protocol::Error> {
+    result_tracker.clear();
     session.send_prompt(prompt_with_tts_contract(&prompt))?;
     loop {
         match session.read_update().await? {
