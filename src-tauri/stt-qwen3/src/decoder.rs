@@ -171,6 +171,9 @@ pub fn decoder_init(
                 detail: format!("Failed to extract present_values: {}", e),
             })?;
 
+    let keys_data: &[f32] = keys_data;
+    let values_data: &[f32] = values_data;
+
     let cache = KvCache {
         keys: ndarray::Array5::from_shape_vec(
             (
@@ -292,6 +295,9 @@ pub fn decoder_step(
                 model: "decoder_step".into(),
                 detail: format!("Failed to extract present_values: {}", e),
             })?;
+
+    let keys_data: &[f32] = keys_data;
+    let values_data: &[f32] = values_data;
 
     let new_cache = KvCache {
         keys: ndarray::Array5::from_shape_vec(

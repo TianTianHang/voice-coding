@@ -52,6 +52,7 @@ pub fn run_encoder(
         });
     }
 
+    let data: &[f32] = data;
     let mut result = Vec::with_capacity(seq_len);
     for row in data.chunks(hidden).take(seq_len) {
         result.push(row.to_vec());
