@@ -141,17 +141,17 @@ describe("autoTtsStatusLabel", () => {
   };
 
   it("distinguishes disabled, idle, speaking, duplicate, and failed states", () => {
-    expect(autoTtsStatusLabel(null)).toBe("Auto speech unknown");
-    expect(autoTtsStatusLabel({ ...base, enabled: false, lastStatus: "disabled" })).toBe("Auto speech off");
-    expect(autoTtsStatusLabel(base)).toBe("Auto speech on");
-    expect(autoTtsStatusLabel({ ...base, isPlaying: true, lastStatus: "speaking" })).toBe("Speaking reply");
-    expect(autoTtsStatusLabel({ ...base, lastStatus: "skippedDuplicate" })).toBe("Duplicate skipped");
+    expect(autoTtsStatusLabel(null)).toBe("");
+    expect(autoTtsStatusLabel({ ...base, enabled: false, lastStatus: "disabled" })).toBe("自动播报关闭");
+    expect(autoTtsStatusLabel(base)).toBe("自动播报已开启");
+    expect(autoTtsStatusLabel({ ...base, isPlaying: true, lastStatus: "speaking" })).toBe("正在播报回复");
+    expect(autoTtsStatusLabel({ ...base, lastStatus: "skippedDuplicate" })).toBe("重复回复已跳过");
     expect(
       autoTtsStatusLabel({
         ...base,
         lastStatus: "failed",
         tts: { ...base.tts, state: "failed", error: "boom" },
       }),
-    ).toBe("Auto speech failed: boom");
+    ).toBe("自动播报失败：boom");
   });
 });

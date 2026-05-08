@@ -37,7 +37,7 @@ describe("AgentEventStream", () => {
     );
 
     expect(markup).toContain("Run tests");
-    expect(markup).toContain("Tool");
+    expect(markup).toContain("工具");
     expect(markup).toContain("failed");
     expect(markup).toContain("src/App.tsx:12");
   });
@@ -167,7 +167,7 @@ describe("AgentEventStream", () => {
       />,
     );
 
-    expect(markup).toContain("Thinking");
+    expect(markup).toContain("思考中");
     expect(markup).toContain("I am thinking");
   });
 
@@ -186,9 +186,9 @@ describe("AgentEventStream", () => {
       />,
     );
 
-    expect(markup).toContain("Show timeline");
-    expect(markup).toContain("Latest: Result");
-    expect(markup).not.toContain("Full agent history");
+    expect(markup).toContain("查看轨迹");
+    expect(markup).toContain("最新：结果");
+    expect(markup).not.toContain("最近 Agent 事件");
   });
 
   it("surfaces confirm events in the collapsed timeline summary", () => {
@@ -207,8 +207,8 @@ describe("AgentEventStream", () => {
       />,
     );
 
-    expect(markup).toContain("1 event stored");
-    expect(markup).toContain("Latest: Confirm");
-    expect(markup).toContain("Show timeline");
+    expect(markup).toContain("已记录 1 条事件");
+    expect(markup).toContain("最新：等待确认");
+    expect(markup).toContain("查看轨迹");
   });
 });

@@ -2,10 +2,8 @@ import { describe, expect, it } from "vitest";
 import { getVadStatusLabel } from "./AudioVisualizer";
 
 describe("getVadStatusLabel", () => {
-  it("shows active waiting copy for listening", () => {
-    expect(getVadStatusLabel("listening")).toBe(
-      "Listening (waiting for speech)..."
-    );
+  it("shows concise listening copy", () => {
+    expect(getVadStatusLabel("listening")).toBe("Listening");
   });
 
   it("keeps processing copy while current utterance is transcribed", () => {

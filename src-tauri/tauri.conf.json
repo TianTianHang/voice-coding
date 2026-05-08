@@ -13,10 +13,9 @@
     "windows": [
       {
         "title": "voice-coding",
-        "width": 760,
-        "height": 760,
-        "minWidth": 360,
-        "minHeight": 520
+        "width": 420,
+        "height": 700,
+        "decorations": false
       }
     ],
     "security": {
