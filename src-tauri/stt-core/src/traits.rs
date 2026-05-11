@@ -1,4 +1,4 @@
-use crate::{AudioInput, Result, SttConfig, SttError, SttResult};
+use crate::{AudioInput, Result, SttConfig, SttError, SttResult, StreamingSttSession};
 
 #[async_trait::async_trait]
 pub trait SttEngine: Send + Sync {
@@ -29,7 +29,13 @@ pub trait SttEngine: Send + Sync {
     async fn health_check(&self) -> Result<bool>;
 }
 
-pub trait StreamingStt: SttEngine {}
+#[async_trait::async_trait]
+pub trait StreamingStt: SttEngine {
+    async fn start_stream(
+        &self,
+        config: SttConfig,
+    ) -> Result<Box<dyn StreamingSttSession + Send + '_>>;
+}
 
 pub trait BatchStt: SttEngine {
     fn transcribe_batch_optimized(

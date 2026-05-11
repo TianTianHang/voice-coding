@@ -6,6 +6,7 @@ mod output;
 pub mod prompt;
 pub mod tokenizer;
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -13,7 +14,11 @@ use std::time::Instant;
 use async_trait::async_trait;
 use log::info;
 use serde::{Deserialize, Serialize};
-use stt_core::{AudioInput, SttConfig, SttEngine, SttError, SttResult, TimingInfo};
+use stt_core::{
+    AudioInput, Result as SttCoreResult, SttConfig, SttEngine, SttError, SttResult,
+    StreamingAudioChunk, StreamingStt, StreamingSttEvent, StreamingSttSession,
+    StreamingTranscript, TimingInfo,
+};
 
 use audio::loader;
 use audio::mel::{compute_mel_spectrogram, create_mel_filterbank};
@@ -22,8 +27,13 @@ use decoder::{decoder_init, run_autoregressive_decode};
 use encoder::run_encoder;
 use models::session::{EmbeddingMatrix, OnnxSessions};
 use output::parse_qwen3_output;
-use prompt::build_prompt_ids;
+use prompt::build_prompt_ids_with_prefix;
 use tokenizer::wrapper::TokenizerWrapper;
+
+const TARGET_SAMPLE_RATE: u32 = 16000;
+const DEFAULT_STREAM_CHUNK_SECONDS: f64 = 2.0;
+const DEFAULT_STREAM_UNFIXED_CHUNK_NUM: usize = 2;
+const DEFAULT_STREAM_UNFIXED_TOKEN_NUM: usize = 5;
 
 const SUPPORTED_LANGUAGES: &[&str] = &[
     "zh", "en", "yue", "ja", "ko", "ar", "de", "fr", "es", "pt", "id", "it", "ru", "th", "vi",
@@ -106,8 +116,25 @@ impl Qwen3AsrEngine {
         samples: &[f32],
         config: &SttConfig,
     ) -> Result<SttResult, SttError> {
+        let decoded = self.decode_samples_with_prefix(samples, config, "")?;
+
+        Ok(stt_result_from_decoded_output(
+            &decoded.text,
+            config,
+            decoded.audio_duration_sec,
+            decoded.processing_time_sec,
+            decoded.tokens_generated,
+        ))
+    }
+
+    fn decode_samples_with_prefix(
+        &self,
+        samples: &[f32],
+        config: &SttConfig,
+        prefix: &str,
+    ) -> Result<DecodedQwen3Output, SttError> {
         let start = Instant::now();
-        let audio_duration = samples.len() as f64 / 16000.0;
+        let audio_duration = samples.len() as f64 / TARGET_SAMPLE_RATE as f64;
 
         let mel = compute_mel_spectrogram(samples, &self.mel_filterbank);
 
@@ -116,7 +143,12 @@ impl Qwen3AsrEngine {
             run_encoder(&mel, &mut sessions)?
         };
 
-        let prompt_ids = build_prompt_ids(encoder_output.len(), config.language.as_deref(), &self.tokenizer)?;
+        let prompt_ids = build_prompt_ids_with_prefix(
+            encoder_output.len(),
+            config.language.as_deref(),
+            prefix,
+            &self.tokenizer,
+        )?;
 
         let (init_token, cache) = {
             let mut sessions = self.sessions.lock().unwrap();
@@ -140,13 +172,294 @@ impl Qwen3AsrEngine {
         let decoded_text = self.tokenizer.decode(&generated_tokens)?;
 
         let processing_time = start.elapsed().as_secs_f64();
-        Ok(stt_result_from_decoded_output(
-            &decoded_text,
+        Ok(DecodedQwen3Output {
+            text: decoded_text,
+            audio_duration_sec: audio_duration,
+            processing_time_sec: processing_time,
+            tokens_generated: generated_tokens.len(),
+        })
+    }
+}
+
+struct DecodedQwen3Output {
+    text: String,
+    audio_duration_sec: f64,
+    processing_time_sec: f64,
+    tokens_generated: usize,
+}
+
+pub struct Qwen3StreamingSession<'a> {
+    engine: &'a Qwen3AsrEngine,
+    config: SttConfig,
+    buffer: Vec<f32>,
+    audio_accum: Vec<f32>,
+    chunk_id: usize,
+    raw_decoded: String,
+    text: String,
+    language: String,
+    processing_time_sec: f64,
+    tokens_generated: usize,
+    chunk_size_samples: usize,
+    unfixed_chunk_num: usize,
+    unfixed_token_num: usize,
+    events: VecDeque<StreamingSttEvent>,
+    cancelled: bool,
+    ended: bool,
+}
+
+impl<'a> Qwen3StreamingSession<'a> {
+    fn new(engine: &'a Qwen3AsrEngine, config: SttConfig) -> Result<Self, SttError> {
+        validate_language(&config)?;
+        let chunk_seconds = config
+            .stream_chunk_seconds
+            .unwrap_or(DEFAULT_STREAM_CHUNK_SECONDS);
+        if !chunk_seconds.is_finite() || chunk_seconds <= 0.0 {
+            return Err(SttError::Other(format!(
+                "stream_chunk_seconds must be greater than zero, got {chunk_seconds}"
+            )));
+        }
+
+        let chunk_size_samples = (chunk_seconds * TARGET_SAMPLE_RATE as f64).round() as usize;
+        if chunk_size_samples == 0 {
+            return Err(SttError::Other(
+                "stream_chunk_seconds produced an empty chunk size".into(),
+            ));
+        }
+
+        Self {
+            engine,
             config,
-            audio_duration,
-            processing_time,
-            generated_tokens.len(),
-        ))
+            buffer: Vec::new(),
+            audio_accum: Vec::new(),
+            chunk_id: 0,
+            raw_decoded: String::new(),
+            text: String::new(),
+            language: "auto".to_string(),
+            processing_time_sec: 0.0,
+            tokens_generated: 0,
+            chunk_size_samples,
+            unfixed_chunk_num: DEFAULT_STREAM_UNFIXED_CHUNK_NUM,
+            unfixed_token_num: DEFAULT_STREAM_UNFIXED_TOKEN_NUM,
+            events: VecDeque::new(),
+            cancelled: false,
+            ended: false,
+        }
+        .with_configured_rollback()
+    }
+
+    fn with_configured_rollback(mut self) -> Result<Self, SttError> {
+        self.unfixed_chunk_num = self
+            .config
+            .stream_unfixed_chunk_num
+            .unwrap_or(DEFAULT_STREAM_UNFIXED_CHUNK_NUM);
+        self.unfixed_token_num = self
+            .config
+            .stream_unfixed_token_num
+            .unwrap_or(DEFAULT_STREAM_UNFIXED_TOKEN_NUM);
+        Ok(self)
+    }
+
+    fn ensure_active(&self) -> Result<(), SttError> {
+        if self.cancelled {
+            Err(SttError::Other("streaming session cancelled".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn append_audio(&mut self, chunk: StreamingAudioChunk) -> Result<(), SttError> {
+        if chunk.sample_rate == 0 {
+            return Err(SttError::AudioLoadError(
+                "sample rate must be greater than zero".into(),
+            ));
+        }
+
+        if chunk.sample_rate == TARGET_SAMPLE_RATE {
+            self.buffer.extend_from_slice(&chunk.samples);
+        } else {
+            let resampled = loader::resample(&chunk.samples, chunk.sample_rate, TARGET_SAMPLE_RATE)
+                .map_err(|e| SttError::AudioLoadError(format!("Resampling failed: {:?}", e)))?;
+            self.buffer.extend_from_slice(&resampled);
+        }
+        Ok(())
+    }
+
+    fn process_ready_chunks(&mut self) -> Result<(), SttError> {
+        while self.buffer.len() >= self.chunk_size_samples {
+            let chunk: Vec<f32> = self.buffer.drain(..self.chunk_size_samples).collect();
+            self.audio_accum.extend_from_slice(&chunk);
+            self.process_accumulated_audio(true)?;
+        }
+        Ok(())
+    }
+
+    fn process_tail(&mut self) -> Result<(), SttError> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+
+        self.audio_accum.append(&mut self.buffer);
+        self.process_accumulated_audio(false)
+    }
+
+    fn process_accumulated_audio(&mut self, emit_partial: bool) -> Result<(), SttError> {
+        let prefix = self.rollback_prefix()?;
+        let decoded = self
+            .engine
+            .decode_samples_with_prefix(&self.audio_accum, &self.config, &prefix)?;
+
+        self.raw_decoded = format!("{prefix}{}", decoded.text);
+        let parsed = parse_qwen3_output(&self.raw_decoded, self.config.language.as_deref());
+        self.text = parsed.text;
+        self.language = parsed.language;
+        self.processing_time_sec += decoded.processing_time_sec;
+        self.tokens_generated += decoded.tokens_generated;
+
+        if emit_partial {
+            self.events.push_back(StreamingSttEvent::Partial(
+                self.current_transcript(),
+            ));
+        }
+        self.chunk_id += 1;
+        Ok(())
+    }
+
+    fn rollback_prefix(&self) -> Result<String, SttError> {
+        rollback_prefix(
+            &self.raw_decoded,
+            self.chunk_id,
+            self.unfixed_chunk_num,
+            self.unfixed_token_num,
+            &self.engine.tokenizer,
+        )
+    }
+
+    fn current_transcript(&self) -> StreamingTranscript {
+        StreamingTranscript {
+            text: self.text.clone(),
+            language: Some(self.language.clone()),
+            start_time_sec: Some(0.0),
+            end_time_sec: Some(self.audio_accum.len() as f64 / TARGET_SAMPLE_RATE as f64),
+            confidence: None,
+        }
+    }
+
+    fn current_result(&self) -> SttResult {
+        let audio_duration = self.audio_accum.len() as f64 / TARGET_SAMPLE_RATE as f64;
+        let rtf = if audio_duration > 0.0 {
+            self.processing_time_sec / audio_duration
+        } else {
+            0.0
+        };
+
+        SttResult {
+            text: self.text.clone(),
+            language: self.language.clone(),
+            confidence: None,
+            timing: TimingInfo {
+                audio_duration_sec: audio_duration,
+                processing_time_sec: self.processing_time_sec,
+                rtf,
+                tokens_generated: Some(self.tokens_generated),
+            },
+        }
+    }
+}
+
+fn validate_language(config: &SttConfig) -> Result<(), SttError> {
+    if let Some(ref lang) = config.language {
+        if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
+            return Err(SttError::UnsupportedLanguage(lang.clone()));
+        }
+    }
+    Ok(())
+}
+
+fn rollback_prefix(
+    raw_decoded: &str,
+    chunk_id: usize,
+    unfixed_chunk_num: usize,
+    unfixed_token_num: usize,
+    tokenizer: &TokenizerWrapper,
+) -> Result<String, SttError> {
+    if chunk_id < unfixed_chunk_num || raw_decoded.is_empty() {
+        return Ok(String::new());
+    }
+
+    let tokens = tokenizer.encode(raw_decoded)?;
+    rollback_prefix_from_tokens(&tokens, unfixed_token_num, tokenizer)
+}
+
+fn rollback_prefix_from_tokens(
+    tokens: &[u32],
+    unfixed_token_num: usize,
+    tokenizer: &TokenizerWrapper,
+) -> Result<String, SttError> {
+    rollback_prefix_from_tokens_with_decoder(tokens, unfixed_token_num, |ids| tokenizer.decode(ids))
+}
+
+fn rollback_prefix_from_tokens_with_decoder(
+    tokens: &[u32],
+    unfixed_token_num: usize,
+    decode: impl Fn(&[u32]) -> Result<String, SttError>,
+) -> Result<String, SttError> {
+    let mut drop_count = unfixed_token_num.min(tokens.len());
+    loop {
+        let keep_len = tokens.len().saturating_sub(drop_count);
+        let prefix = decode(&tokens[..keep_len])?;
+        if !prefix.contains('\u{fffd}') || keep_len == 0 {
+            return Ok(prefix);
+        }
+        drop_count += 1;
+    }
+}
+
+#[async_trait]
+impl StreamingStt for Qwen3AsrEngine {
+    async fn start_stream(
+        &self,
+        config: SttConfig,
+    ) -> SttCoreResult<Box<dyn StreamingSttSession + Send + '_>> {
+        Ok(Box::new(Qwen3StreamingSession::new(self, config)?))
+    }
+}
+
+#[async_trait]
+impl StreamingSttSession for Qwen3StreamingSession<'_> {
+    async fn push_audio(&mut self, chunk: StreamingAudioChunk) -> SttCoreResult<()> {
+        self.ensure_active()?;
+        if self.ended {
+            return Err(SttError::Other("cannot push audio after stream finished".into()));
+        }
+
+        self.append_audio(chunk)?;
+        self.process_ready_chunks()
+    }
+
+    async fn next_event(&mut self) -> SttCoreResult<Option<StreamingSttEvent>> {
+        self.ensure_active()?;
+        Ok(self.events.pop_front())
+    }
+
+    async fn finish(&mut self) -> SttCoreResult<SttResult> {
+        self.ensure_active()?;
+        if !self.ended {
+            self.process_tail()?;
+            let result = self.current_result();
+            self.events.push_back(StreamingSttEvent::End(result.clone()));
+            self.ended = true;
+            Ok(result)
+        } else {
+            Ok(self.current_result())
+        }
+    }
+
+    async fn cancel(&mut self) -> SttCoreResult<()> {
+        self.buffer.clear();
+        self.audio_accum.clear();
+        self.events.clear();
+        self.cancelled = true;
+        Ok(())
     }
 }
 
@@ -196,11 +509,7 @@ impl SttEngine for Qwen3AsrEngine {
         input: AudioInput,
         config: SttConfig,
     ) -> Result<SttResult, SttError> {
-        if let Some(ref lang) = config.language {
-            if !SUPPORTED_LANGUAGES.contains(&lang.as_str()) {
-                return Err(SttError::UnsupportedLanguage(lang.clone()));
-            }
-        }
+        validate_language(&config)?;
 
         let samples = match input {
             AudioInput::FilePath(path) => loader::load_audio_from_file(&path)?,
@@ -353,5 +662,53 @@ mod tests {
         let elapsed = elapsed_ms(Instant::now());
 
         assert!(elapsed < 1_000);
+    }
+
+    #[test]
+    fn rollback_prefix_keeps_stable_tokens() {
+        let tokens = vec![1, 2, 3, 4, 5];
+
+        let prefix = rollback_prefix_from_tokens_with_decoder(&tokens, 2, |ids| {
+            Ok(ids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","))
+        })
+        .unwrap();
+
+        assert_eq!(prefix, "1,2,3");
+    }
+
+    #[test]
+    fn rollback_prefix_drops_all_tokens_when_unfixed_count_is_large() {
+        let tokens = vec![1, 2, 3];
+
+        let prefix = rollback_prefix_from_tokens_with_decoder(&tokens, 99, |ids| {
+            Ok(ids
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(","))
+        })
+        .unwrap();
+
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn rollback_prefix_drops_more_tokens_for_replacement_char() {
+        let tokens = vec![1, 2, 3, 4, 5];
+
+        let prefix = rollback_prefix_from_tokens_with_decoder(&tokens, 1, |ids| {
+            if ids.len() > 2 {
+                Ok("bad\u{fffd}".to_string())
+            } else {
+                Ok("stable".to_string())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(prefix, "stable");
     }
 }

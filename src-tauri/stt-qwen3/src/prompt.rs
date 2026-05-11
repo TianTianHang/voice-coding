@@ -24,6 +24,15 @@ pub fn build_prompt_ids(
     language: Option<&str>,
     tokenizer: &dyn PromptTokenizer,
 ) -> Result<Vec<u32>, SttError> {
+    build_prompt_ids_with_prefix(n_audio_tokens, language, "", tokenizer)
+}
+
+pub fn build_prompt_ids_with_prefix(
+    n_audio_tokens: usize,
+    language: Option<&str>,
+    prefix: &str,
+    tokenizer: &dyn PromptTokenizer,
+) -> Result<Vec<u32>, SttError> {
     let mut ids = Vec::new();
 
     let system_tokens = tokenizer.encode("system")?;
@@ -54,6 +63,11 @@ pub fn build_prompt_ids(
         let lang_text = format!("language {}<asr_text>", lang);
         let lang_tokens = tokenizer.encode(&lang_text)?;
         ids.extend_from_slice(&lang_tokens);
+    }
+
+    if !prefix.is_empty() {
+        let prefix_tokens = tokenizer.encode(prefix)?;
+        ids.extend_from_slice(&prefix_tokens);
     }
 
     Ok(ids)
@@ -123,6 +137,15 @@ mod tests {
         build_prompt_ids(n_audio_tokens, language, &fake as &dyn PromptTokenizer)
     }
 
+    fn build_prompt_ids_with_prefix_fake(
+        n_audio_tokens: usize,
+        language: Option<&str>,
+        prefix: &str,
+    ) -> Result<Vec<u32>, SttError> {
+        let fake = FakeTokenizer::new();
+        build_prompt_ids_with_prefix(n_audio_tokens, language, prefix, &fake as &dyn PromptTokenizer)
+    }
+
     #[test]
     fn test_build_prompt_ids_no_audio() {
         let ids = build_prompt_ids_fake(0, None).unwrap();
@@ -154,6 +177,23 @@ mod tests {
         let ids = build_prompt_ids_fake(5, Some("zh")).unwrap();
 
         assert!(ids.len() > 20);
+    }
+
+    #[test]
+    fn test_build_prompt_ids_with_prefix() {
+        let without_prefix = build_prompt_ids_fake(5, Some("zh")).unwrap();
+        let with_prefix = build_prompt_ids_with_prefix_fake(5, Some("zh"), "hello").unwrap();
+
+        assert_eq!(with_prefix.len(), without_prefix.len() + 2);
+    }
+
+    #[test]
+    fn test_build_prompt_ids_with_auto_prefix() {
+        let without_prefix = build_prompt_ids_fake(5, None).unwrap();
+        let with_prefix =
+            build_prompt_ids_with_prefix_fake(5, None, "language English<asr_text>hello").unwrap();
+
+        assert_eq!(with_prefix.len(), without_prefix.len() + 2);
     }
 
     #[test]
