@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -20,6 +20,38 @@ export type TtsInvokeConfig = {
   };
 };
 
+type AsrDebugSourceKind = "url" | "file";
+
+type DebugStreamingAsrEvent = {
+  runId: string;
+  kind: "started" | "partial" | "final" | "end";
+  text: string;
+  language?: string | null;
+  endTimeSec?: number | null;
+};
+
+type DebugStreamingAsrResult = {
+  runId: string;
+  text: string;
+  language: string;
+  audioDurationSec: number;
+  processingTimeSec: number;
+  rtf: number;
+  tokensGenerated?: number | null;
+  events: DebugStreamingAsrEvent[];
+};
+
+export type DebugStreamingAsrInvokeRequest = {
+  runId: string;
+  sourceKind: AsrDebugSourceKind;
+  source: string;
+  audioData?: number[];
+  language?: string;
+  chunkSeconds?: number;
+  unfixedChunkNum?: number;
+  unfixedTokenNum?: number;
+};
+
 export function buildTtsInvokeConfig(
   samplingMode: MossSamplingMode,
   referenceAudioPath: string,
@@ -31,6 +63,75 @@ export function buildTtsInvokeConfig(
       ...(path ? { referenceAudioPath: path } : {}),
     },
   };
+}
+
+export function buildDebugStreamingAsrRequest(
+  runId: string,
+  sourceKind: AsrDebugSourceKind,
+  source: string,
+  audioData: number[] | undefined,
+  language: string,
+  chunkSeconds: string,
+  unfixedChunkNum: string,
+  unfixedTokenNum: string,
+): DebugStreamingAsrInvokeRequest {
+  const request: DebugStreamingAsrInvokeRequest = {
+    runId,
+    sourceKind,
+    source: source.trim(),
+  };
+  if (audioData && audioData.length > 0) {
+    request.audioData = audioData;
+  }
+  const trimmedLanguage = language.trim();
+  if (trimmedLanguage) {
+    request.language = trimmedLanguage;
+  }
+
+  const parsedChunkSeconds = optionalFiniteNumber(chunkSeconds);
+  if (parsedChunkSeconds !== undefined) {
+    request.chunkSeconds = parsedChunkSeconds;
+  }
+
+  const parsedUnfixedChunkNum = optionalNonNegativeInteger(unfixedChunkNum);
+  if (parsedUnfixedChunkNum !== undefined) {
+    request.unfixedChunkNum = parsedUnfixedChunkNum;
+  }
+
+  const parsedUnfixedTokenNum = optionalNonNegativeInteger(unfixedTokenNum);
+  if (parsedUnfixedTokenNum !== undefined) {
+    request.unfixedTokenNum = parsedUnfixedTokenNum;
+  }
+
+  return request;
+}
+
+export function createDebugAsrRunId(now = Date.now()): string {
+  return `asr-debug-${now}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function formatAsrDebugTime(seconds?: number | null): string {
+  if (seconds === undefined || seconds === null || !Number.isFinite(seconds)) {
+    return "--";
+  }
+  return `${seconds.toFixed(2)}s`;
+}
+
+function optionalFiniteNumber(value: string): number | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function optionalNonNegativeInteger(value: string): number | undefined {
+  const parsed = optionalFiniteNumber(value);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  return Math.max(0, Math.floor(parsed));
 }
 
 export function DebugToolsWindow() {
@@ -48,6 +149,25 @@ export function DebugToolsWindow() {
   const [isSynthesizingTts, setIsSynthesizingTts] = useState(false);
   const [isPlayingTts, setIsPlayingTts] = useState(false);
   const [isUpdatingAutoTts, setIsUpdatingAutoTts] = useState(false);
+  const [asrSourceKind, setAsrSourceKind] =
+    useState<AsrDebugSourceKind>("file");
+  const [asrSource, setAsrSource] = useState("");
+  const [asrSelectedFileName, setAsrSelectedFileName] = useState("");
+  const [asrSelectedFileData, setAsrSelectedFileData] = useState<number[]>();
+  const [asrLanguage, setAsrLanguage] = useState("");
+  const [asrChunkSeconds, setAsrChunkSeconds] = useState("2");
+  const [asrUnfixedChunkNum, setAsrUnfixedChunkNum] = useState("2");
+  const [asrUnfixedTokenNum, setAsrUnfixedTokenNum] = useState("5");
+  const [asrResult, setAsrResult] = useState<DebugStreamingAsrResult | null>(
+    null,
+  );
+  const [asrEvents, setAsrEvents] = useState<DebugStreamingAsrEvent[]>([]);
+  const activeAsrRunIdRef = useRef<string | null>(null);
+  const [showAsrOutput, setShowAsrOutput] = useState(false);
+  const [liveAsrText, setLiveAsrText] = useState("");
+  const [targetLiveAsrText, setTargetLiveAsrText] = useState("");
+  const [asrMessage, setAsrMessage] = useState<string | null>(null);
+  const [isTestingAsr, setIsTestingAsr] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -94,6 +214,65 @@ export function DebugToolsWindow() {
       active = false;
     };
   }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
+    async function setupDebugAsrEvents() {
+      unlisten = await listen<DebugStreamingAsrEvent>(
+        "debug-streaming-asr",
+        (event) => {
+          const payload = event.payload;
+          if (activeAsrRunIdRef.current !== payload.runId) {
+            return;
+          }
+
+          setAsrEvents((current) => [...current, payload]);
+          if (payload.kind === "started") {
+            setAsrMessage("Streaming ASR started.");
+            setLiveAsrText("");
+            setTargetLiveAsrText("");
+          } else {
+            setTargetLiveAsrText(payload.text);
+            setAsrMessage(
+              payload.kind === "end"
+                ? "Streaming ASR finished."
+                : `Streaming ASR updated at ${formatAsrDebugTime(payload.endTimeSec)}.`,
+            );
+          }
+        },
+      );
+    }
+
+    void setupDebugAsrEvents();
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (liveAsrText === targetLiveAsrText) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setLiveAsrText((current) => {
+        if (current === targetLiveAsrText) {
+          return current;
+        }
+
+        if (!targetLiveAsrText.startsWith(current)) {
+          return targetLiveAsrText.slice(0, 1);
+        }
+
+        const nextLength = Math.min(current.length + 1, targetLiveAsrText.length);
+        return targetLiveAsrText.slice(0, nextLength);
+      });
+    }, 18);
+
+    return () => window.clearTimeout(timer);
+  }, [liveAsrText, targetLiveAsrText]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
@@ -240,6 +419,71 @@ export function DebugToolsWindow() {
     }
   }
 
+  async function testStreamingAsr() {
+    const source = asrSource.trim();
+    if (!source && !asrSelectedFileData?.length) {
+      setAsrMessage("ASR source must not be empty.");
+      return;
+    }
+
+    setIsTestingAsr(true);
+    const runId = createDebugAsrRunId();
+    activeAsrRunIdRef.current = runId;
+    setAsrMessage(null);
+    setAsrResult(null);
+    setAsrEvents([]);
+    setShowAsrOutput(true);
+    setLiveAsrText("");
+    setTargetLiveAsrText("");
+    try {
+      const result = await invoke<DebugStreamingAsrResult>(
+        "debug_streaming_asr",
+        {
+          request: buildDebugStreamingAsrRequest(
+            runId,
+            asrSourceKind,
+            source,
+            asrSourceKind === "file" ? asrSelectedFileData : undefined,
+            asrLanguage,
+            asrChunkSeconds,
+            asrUnfixedChunkNum,
+            asrUnfixedTokenNum,
+          ),
+        },
+      );
+      if (result.runId === runId) {
+        setAsrResult(result);
+        setTargetLiveAsrText(result.text);
+        setAsrMessage(
+          `Streaming ASR finished with ${result.events.length} events.`,
+        );
+      }
+    } catch (error) {
+      setAsrMessage(String(error));
+    } finally {
+      setIsTestingAsr(false);
+    }
+  }
+
+  async function selectAsrFile(file: File | null) {
+    if (!file) {
+      setAsrSelectedFileName("");
+      setAsrSelectedFileData(undefined);
+      return;
+    }
+
+    setAsrSelectedFileName(file.name);
+    setAsrMessage(null);
+    try {
+      const data = new Uint8Array(await file.arrayBuffer());
+      setAsrSelectedFileData(Array.from(data));
+      setAsrSource(file.name);
+    } catch (error) {
+      setAsrSelectedFileData(undefined);
+      setAsrMessage(String(error));
+    }
+  }
+
   return (
     <main className="voice-shell min-h-screen p-3 text-slate-950 sm:p-4">
       <section className="debug-window mx-auto flex min-h-[calc(100vh-1.5rem)] w-full max-w-2xl flex-col gap-4 rounded-lg border border-slate-200 bg-white p-4 shadow-[0_18px_48px_rgba(15,23,42,0.10)] sm:min-h-[calc(100vh-2rem)]">
@@ -248,7 +492,7 @@ export function DebugToolsWindow() {
             Debug Tools
           </h1>
           <p className="mt-1 text-sm text-slate-600">
-            VAD threshold and TTS runtime controls
+            VAD threshold, streaming ASR, and TTS runtime controls
           </p>
         </header>
 
@@ -284,6 +528,147 @@ export function DebugToolsWindow() {
               <p className="text-xs font-semibold text-slate-700">
                 {vadConfigMessage}
               </p>
+            )}
+          </div>
+        </section>
+
+        <section className="debug-panel" aria-label="Developer streaming ASR controls">
+          <div className="mb-2 text-[11px] font-extrabold uppercase text-slate-500">
+            Streaming ASR Test
+          </div>
+          <div className="grid gap-2">
+            <div className="grid grid-cols-[minmax(0,0.7fr)_minmax(0,1.3fr)] gap-2">
+              <select
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                value={asrSourceKind}
+                onChange={(event) =>
+                  setAsrSourceKind(event.target.value as AsrDebugSourceKind)
+                }
+                aria-label="Streaming ASR source type"
+              >
+                <option value="file">file path</option>
+                <option value="url">URL</option>
+              </select>
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="text"
+                value={asrSource}
+                onChange={(event) => setAsrSource(event.target.value)}
+                placeholder={
+                  asrSourceKind === "url"
+                    ? "https://example.com/audio.wav"
+                    : "/absolute/path/to/audio.wav or choose file"
+                }
+                aria-label="Streaming ASR source"
+              />
+            </div>
+            {asrSourceKind === "file" && (
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm font-semibold text-slate-900 file:mr-3 file:cursor-pointer file:rounded-md file:border-0 file:bg-slate-950 file:px-3 file:py-1.5 file:text-xs file:font-extrabold file:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="file"
+                accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg"
+                onChange={(event) =>
+                  void selectAsrFile(event.currentTarget.files?.[0] ?? null)
+                }
+                aria-label="Streaming ASR audio file"
+              />
+            )}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="text"
+                value={asrLanguage}
+                onChange={(event) => setAsrLanguage(event.target.value)}
+                placeholder="lang"
+                aria-label="Streaming ASR language"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={asrChunkSeconds}
+                onChange={(event) => setAsrChunkSeconds(event.target.value)}
+                aria-label="Streaming ASR chunk seconds"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min={0}
+                step={1}
+                value={asrUnfixedChunkNum}
+                onChange={(event) => setAsrUnfixedChunkNum(event.target.value)}
+                aria-label="Streaming ASR unfixed chunk count"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min={0}
+                step={1}
+                value={asrUnfixedTokenNum}
+                onChange={(event) => setAsrUnfixedTokenNum(event.target.value)}
+                aria-label="Streaming ASR unfixed token count"
+              />
+            </div>
+            <button
+              className="min-h-10 cursor-pointer rounded-lg border border-slate-950 bg-slate-950 px-3 text-sm font-extrabold text-white transition-colors duration-200 hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={testStreamingAsr}
+              disabled={isTestingAsr}
+              type="button"
+            >
+              {isTestingAsr ? "Running..." : "Run Streaming ASR"}
+            </button>
+            <p className="text-xs text-slate-600">
+              Fields: language, chunk seconds, unfixed chunks, unfixed tokens.
+              {asrSelectedFileName ? ` Selected: ${asrSelectedFileName}` : ""}
+            </p>
+            {asrMessage && (
+              <p className="text-xs font-semibold text-slate-700">
+                {asrMessage}
+              </p>
+            )}
+            {showAsrOutput && (
+              <div className="grid gap-2">
+                <div className="rounded-lg border border-slate-200 bg-white p-3">
+                  <div className="mb-1 text-[11px] font-extrabold uppercase text-slate-500">
+                    {isTestingAsr ? "Live Transcript" : "Final Transcript"}
+                  </div>
+                  <p className="whitespace-pre-wrap text-sm font-semibold text-slate-900">
+                    {(liveAsrText || asrResult?.text) || "(empty)"}
+                  </p>
+                  {isTestingAsr && !liveAsrText && (
+                    <p className="mt-2 text-xs font-semibold text-slate-500">
+                      Waiting for first streaming update...
+                    </p>
+                  )}
+                  {asrResult && (
+                    <p className="mt-2 text-xs text-slate-600">
+                      {asrResult.language} ·{" "}
+                      {formatAsrDebugTime(asrResult.audioDurationSec)} audio · RTF{" "}
+                      {asrResult.rtf.toFixed(2)}
+                      {asrResult.tokensGenerated
+                        ? ` · ${asrResult.tokensGenerated} tokens`
+                        : ""}
+                    </p>
+                  )}
+                </div>
+                <div className="max-h-56 overflow-auto rounded-lg border border-slate-200 bg-white">
+                  {(asrEvents.length > 0 ? asrEvents : asrResult?.events ?? []).map((event, index) => (
+                    <div
+                      className="border-b border-slate-100 p-3 last:border-b-0"
+                      key={`${event.kind}-${index}`}
+                    >
+                      <div className="mb-1 flex items-center justify-between gap-2 text-[11px] font-extrabold uppercase text-slate-500">
+                        <span>{event.kind}</span>
+                        <span>{formatAsrDebugTime(event.endTimeSec)}</span>
+                      </div>
+                      <p className="whitespace-pre-wrap text-sm font-semibold text-slate-900">
+                        {event.text || "(empty)"}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
           </div>
         </section>

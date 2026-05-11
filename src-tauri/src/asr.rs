@@ -42,6 +42,42 @@ pub struct AsrStatusSnapshot {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStreamingAsrRequest {
+    pub run_id: String,
+    pub source_kind: String,
+    pub source: String,
+    pub audio_data: Option<Vec<u8>>,
+    pub language: Option<String>,
+    pub chunk_seconds: Option<f64>,
+    pub unfixed_chunk_num: Option<usize>,
+    pub unfixed_token_num: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStreamingAsrEvent {
+    pub run_id: String,
+    pub kind: String,
+    pub text: String,
+    pub language: Option<String>,
+    pub end_time_sec: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugStreamingAsrResult {
+    pub run_id: String,
+    pub text: String,
+    pub language: String,
+    pub audio_duration_sec: f64,
+    pub processing_time_sec: f64,
+    pub rtf: f64,
+    pub tokens_generated: Option<usize>,
+    pub events: Vec<DebugStreamingAsrEvent>,
+}
+
 #[cfg(feature = "stt-qwen3")]
 type EngineLoader = dyn Fn(&str) -> Result<Qwen3AsrEngine, String> + Send + Sync;
 
@@ -477,6 +513,210 @@ pub async fn transcribe_audio_data(
         let _ = (audio_data, language);
         Err("STT engine not available: no engine feature enabled".into())
     }
+}
+
+#[tauri::command]
+pub async fn debug_streaming_asr(
+    app: tauri::AppHandle,
+    request: DebugStreamingAsrRequest,
+) -> Result<DebugStreamingAsrResult, String> {
+    #[cfg(feature = "stt-qwen3")]
+    {
+        let started = Instant::now();
+        let run_id = request.run_id.clone();
+        let source_kind = request.source_kind.clone();
+        log::info!(
+            "Debug streaming ASR started: run_id={} source_kind={} language={:?}",
+            run_id,
+            source_kind,
+            request.language
+        );
+
+        let app_for_task = app.clone();
+        let engine = get_stt_engine(Some(app)).await?;
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            run_debug_streaming_asr(app_for_task, engine, request)
+        })
+        .await
+        .map_err(|e| format!("Debug streaming ASR task failed: {}", e))??;
+
+        log::info!(
+            "Debug streaming ASR finished in {}ms: run_id={} source_kind={} chars={} partials={}",
+            started.elapsed().as_millis(),
+            run_id,
+            source_kind,
+            result.text.chars().count(),
+            result.events.len()
+        );
+        Ok(result)
+    }
+
+    #[cfg(not(feature = "stt-qwen3"))]
+    {
+        let _ = (app, request);
+        Err("STT engine not available: no engine feature enabled".into())
+    }
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn run_debug_streaming_asr(
+    app: AppHandle,
+    engine: Arc<Qwen3AsrEngine>,
+    request: DebugStreamingAsrRequest,
+) -> Result<DebugStreamingAsrResult, String> {
+    use stt_core::{StreamingAudioChunk, StreamingStt};
+
+    let run_id = request.run_id.clone();
+    emit_debug_streaming_asr_event(
+        &app,
+        DebugStreamingAsrEvent {
+            run_id: run_id.clone(),
+            kind: "started".to_string(),
+            text: String::new(),
+            language: None,
+            end_time_sec: None,
+        },
+    );
+
+    let samples = load_debug_streaming_samples(&request)?;
+    let config = SttConfig {
+        language: request.language,
+        stream_chunk_seconds: request.chunk_seconds,
+        stream_unfixed_chunk_num: request.unfixed_chunk_num,
+        stream_unfixed_token_num: request.unfixed_token_num,
+        ..Default::default()
+    };
+
+    let mut stream = tauri::async_runtime::block_on(engine.start_stream(config))
+        .map_err(|e| e.to_string())?;
+    let mut events = Vec::new();
+    let chunk_size = 4_000usize;
+
+    for chunk in samples.chunks(chunk_size) {
+        tauri::async_runtime::block_on(stream.push_audio(StreamingAudioChunk::new(
+            chunk.to_vec(),
+            16_000,
+        )))
+        .map_err(|e| e.to_string())?;
+        drain_debug_streaming_events(&app, &run_id, stream.as_mut(), &mut events)?;
+    }
+
+    let result = tauri::async_runtime::block_on(stream.finish()).map_err(|e| e.to_string())?;
+    drain_debug_streaming_events(&app, &run_id, stream.as_mut(), &mut events)?;
+
+    Ok(DebugStreamingAsrResult {
+        run_id,
+        text: result.text,
+        language: result.language,
+        audio_duration_sec: result.timing.audio_duration_sec,
+        processing_time_sec: result.timing.processing_time_sec,
+        rtf: result.timing.rtf,
+        tokens_generated: result.timing.tokens_generated,
+        events,
+    })
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn drain_debug_streaming_events(
+    app: &AppHandle,
+    run_id: &str,
+    stream: &mut dyn stt_core::StreamingSttSession,
+    events: &mut Vec<DebugStreamingAsrEvent>,
+) -> Result<(), String> {
+    loop {
+        let event = tauri::async_runtime::block_on(stream.next_event()).map_err(|e| e.to_string())?;
+        let Some(event) = event else {
+            break;
+        };
+        match event {
+            stt_core::StreamingSttEvent::Partial(transcript) => {
+                push_debug_streaming_asr_event(app, events, DebugStreamingAsrEvent {
+                    run_id: run_id.to_string(),
+                    kind: "partial".to_string(),
+                    text: transcript.text,
+                    language: transcript.language,
+                    end_time_sec: transcript.end_time_sec,
+                });
+            }
+            stt_core::StreamingSttEvent::Final(transcript) => {
+                push_debug_streaming_asr_event(app, events, DebugStreamingAsrEvent {
+                    run_id: run_id.to_string(),
+                    kind: "final".to_string(),
+                    text: transcript.text,
+                    language: transcript.language,
+                    end_time_sec: transcript.end_time_sec,
+                });
+            }
+            stt_core::StreamingSttEvent::End(result) => {
+                push_debug_streaming_asr_event(app, events, DebugStreamingAsrEvent {
+                    run_id: run_id.to_string(),
+                    kind: "end".to_string(),
+                    text: result.text,
+                    language: Some(result.language),
+                    end_time_sec: Some(result.timing.audio_duration_sec),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn push_debug_streaming_asr_event(
+    app: &AppHandle,
+    events: &mut Vec<DebugStreamingAsrEvent>,
+    event: DebugStreamingAsrEvent,
+) {
+    emit_debug_streaming_asr_event(app, event.clone());
+    events.push(event);
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn emit_debug_streaming_asr_event(app: &AppHandle, event: DebugStreamingAsrEvent) {
+    let _ = app.emit("debug-streaming-asr", event);
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn load_debug_streaming_samples(request: &DebugStreamingAsrRequest) -> Result<Vec<f32>, String> {
+    let source = request.source.trim();
+    if source.is_empty() && request.audio_data.as_ref().is_none_or(Vec::is_empty) {
+        return Err("ASR source must not be empty".into());
+    }
+
+    match request.source_kind.as_str() {
+        "file" => {
+            if let Some(audio_data) = request.audio_data.as_deref() {
+                if !audio_data.is_empty() {
+                    return stt_qwen3::audio::loader::load_audio_from_bytes(audio_data)
+                        .map_err(|e| e.to_string());
+                }
+            }
+            load_debug_file_samples(source)
+        }
+        "url" => load_debug_url_samples(source),
+        other => Err(format!("Unknown ASR debug source kind: {other}")),
+    }
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn load_debug_file_samples(path: &str) -> Result<Vec<f32>, String> {
+    stt_qwen3::audio::loader::load_audio_from_file(path).map_err(|e| e.to_string())
+}
+
+#[cfg(feature = "stt-qwen3")]
+fn load_debug_url_samples(url: &str) -> Result<Vec<f32>, String> {
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return Err("URL source must start with http:// or https://".into());
+    }
+
+    let mut response = ureq::get(url)
+        .call()
+        .map_err(|e| format!("Failed to download audio URL: {e}"))?;
+    let bytes = response
+        .body_mut()
+        .read_to_vec()
+        .map_err(|e| format!("Failed to read audio URL response: {e}"))?;
+    stt_qwen3::audio::loader::load_audio_from_bytes(&bytes).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

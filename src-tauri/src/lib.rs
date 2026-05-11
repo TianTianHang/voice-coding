@@ -108,6 +108,7 @@ pub fn run() {
             asr::get_asr_status,
             asr::transcribe,
             asr::transcribe_audio_data,
+            asr::debug_streaming_asr,
             tts::prepare_tts,
             tts::get_tts_status,
             tts::synthesize_tts,
