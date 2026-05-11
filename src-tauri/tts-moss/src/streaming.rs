@@ -291,7 +291,37 @@ fn synthesize_stream_prepared_with_sessions(
     } else {
         prepared.prompt_audio_codes
     };
+    synthesize_stream_chunks(
+        chunks_rx,
+        cancel_flag,
+        events_tx,
+        |chunk, emit_chunk| {
+            let request = prepared
+                .assets
+                .build_voice_clone_request_rows(chunk.token_ids.clone(), &prompt_audio_codes)?;
+            sessions.synthesize_streaming_frames(
+                &prepared.assets,
+                request,
+                prepared.sampling_mode,
+                prepared.requested_chunk_ms,
+                emit_chunk,
+            )
+        },
+    )
+}
 
+fn synthesize_stream_chunks<F>(
+    chunks_rx: std::sync::mpsc::Receiver<Option<StreamWorkerChunk>>,
+    cancel_flag: Arc<AtomicBool>,
+    events_tx: tokio::sync::mpsc::UnboundedSender<TtsSynthesisEvent>,
+    mut synthesize_chunk: F,
+) -> Result<TtsResult, MossTtsError>
+where
+    F: FnMut(
+        &PreparedTextChunk,
+        &mut dyn FnMut(Vec<f32>, bool) -> Result<(), MossTtsError>,
+    ) -> Result<TtsResult, MossTtsError>,
+{
     let mut results = Vec::new();
     let mut sequence = 0u64;
     let mut produced_samples = 0usize;
@@ -312,33 +342,28 @@ fn synthesize_stream_prepared_with_sessions(
                 is_final,
             }),
         )?;
-        let request = prepared
-            .assets
-            .build_voice_clone_request_rows(chunk.token_ids, &prompt_audio_codes)?;
-        let result = sessions.synthesize_streaming_frames(
-            &prepared.assets,
-            request,
-            prepared.sampling_mode,
-            prepared.requested_chunk_ms,
-            |samples, is_final_batch| {
-                if cancel_flag.load(Ordering::SeqCst) {
-                    return Err(cancelled_stream_error());
-                }
-                sequence = sequence.saturating_add(1);
-                let is_final = is_final && is_final_batch;
-                send_stream_event(
-                    &cancel_flag,
-                    &events_tx,
-                    make_audio_chunk_event(
-                        sequence,
-                        samples,
-                        &mut produced_samples,
-                        chunk.text.len(),
-                        is_final,
-                    ),
-                )
-            },
-        )?;
+        let mut emit_chunk = |samples, is_final_batch| {
+            if cancel_flag.load(Ordering::SeqCst) {
+                return Err(cancelled_stream_error());
+            }
+            sequence = sequence.saturating_add(1);
+            let is_final = is_final && is_final_batch;
+            send_stream_event(
+                &cancel_flag,
+                &events_tx,
+                make_audio_chunk_event(
+                    sequence,
+                    samples,
+                    &mut produced_samples,
+                    chunk.text.len(),
+                    is_final,
+                ),
+            )
+        };
+        let result = synthesize_chunk(&chunk, &mut emit_chunk)?;
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err(cancelled_stream_error());
+        }
         results.push(result);
         send_stream_event(
             &cancel_flag,

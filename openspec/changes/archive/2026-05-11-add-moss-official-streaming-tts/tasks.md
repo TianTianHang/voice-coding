@@ -17,9 +17,9 @@
 
 - [x] 3.1 增加 frame budget helper 单元测试，覆盖阈值、metadata batch 上限和最终 flush。
 - [x] 3.2 增加 codec streaming state 更新测试，覆盖缺失 state 输出时返回 `codec_decode_step` 阶段错误。
-- [ ] 3.3 增加 MOSS stream session 事件顺序测试，验证 `AudioChunk` 可在 `End` 前产生且 sequence 单调递增。
-- [ ] 3.4 增加 `finish` 与 `End(TtsResult)` 一致性测试。
-- [ ] 3.5 增加取消测试，验证取消后不再发送新的 `AudioChunk` 或 `End`。
+- [x] 3.3 增加 MOSS stream session 事件顺序测试，验证 `AudioChunk` 可在 `End` 前产生且 sequence 单调递增。
+- [x] 3.4 增加 `finish` 与 `End(TtsResult)` 一致性测试。
+- [x] 3.5 增加取消测试，验证取消后不再发送新的 `AudioChunk` 或 `End`。
 - [x] 3.6 增加外部流式路径 codec decode step 失败时不 fallback 到 `decode_full` 的测试。
 
 ## 4. 验证

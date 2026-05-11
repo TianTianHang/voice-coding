@@ -490,6 +490,95 @@ mod tests {
     }
 
     #[test]
+    fn stream_session_events_emit_audio_chunks_before_end_with_monotonic_sequences() {
+        let (events, result) = run_stubbed_stream_session(
+            vec![
+                stream_worker_chunk("hello", false),
+                stream_worker_chunk("world", true),
+            ],
+            |chunk, emit| {
+                emit(samples_for_text(&chunk.text, 0.1), false)?;
+                emit(samples_for_text(&chunk.text, 0.2), true)?;
+                Ok(tts_result(samples_for_text(&chunk.text, 0.3)))
+            },
+        )
+        .unwrap();
+
+        let end_index = events
+            .iter()
+            .position(|event| matches!(event, TtsSynthesisEvent::End(_)))
+            .expect("stream should emit End");
+        let audio_sequences = events
+            .iter()
+            .take(end_index)
+            .filter_map(|event| match event {
+                TtsSynthesisEvent::AudioChunk(chunk) => Some(chunk.sequence),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(audio_sequences, vec![1, 2, 3, 4]);
+        assert!(matches!(events.last(), Some(TtsSynthesisEvent::End(_))));
+        assert!(
+            matches!(result.audio.pcm, PcmData::F32(samples) if samples == vec![
+                0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3,
+                0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3
+            ])
+        );
+    }
+
+    #[test]
+    fn stream_session_finish_result_matches_end_event_result() {
+        let (events, finish_result) =
+            run_stubbed_stream_session(vec![stream_worker_chunk("hello", true)], |chunk, emit| {
+                emit(samples_for_text(&chunk.text, 0.4), true)?;
+                Ok(tts_result(samples_for_text(&chunk.text, 0.5)))
+            })
+            .unwrap();
+
+        let end_result = events
+            .iter()
+            .find_map(|event| match event {
+                TtsSynthesisEvent::End(result) => Some(result),
+                _ => None,
+            })
+            .expect("stream should emit End result");
+
+        assert_eq!(pcm_samples(&finish_result), pcm_samples(end_result));
+    }
+
+    #[test]
+    fn stream_session_cancel_stops_new_audio_chunks_and_end() {
+        let (chunks_tx, chunks_rx) = std::sync::mpsc::channel();
+        chunks_tx
+            .send(Some(stream_worker_chunk("hello", true)))
+            .unwrap();
+        chunks_tx.send(None).unwrap();
+        drop(chunks_tx);
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let flag_for_synth = Arc::clone(&cancel_flag);
+
+        let err = synthesize_stream_chunks(
+            chunks_rx,
+            Arc::clone(&cancel_flag),
+            events_tx,
+            |_chunk, _emit| {
+                flag_for_synth.store(true, Ordering::SeqCst);
+                Err(cancelled_stream_error())
+            },
+        )
+        .expect_err("cancelled stream should stop without End");
+
+        assert!(err.to_string().contains("cancelled"));
+        let events = drain_events(&mut events_rx);
+        assert!(events.iter().all(|event| !matches!(
+            event,
+            TtsSynthesisEvent::AudioChunk(_) | TtsSynthesisEvent::End(_)
+        )));
+    }
+
+    #[test]
     fn interleaves_codec_audio_from_channel_major_output() {
         let samples = interleave_codec_audio(
             &[1, 2, 3],
@@ -560,6 +649,81 @@ mod tests {
             .expect_err("invalid fixture ONNX files must surface as worker init errors");
 
         assert!(err.to_string().contains("session_init"));
+    }
+
+    fn run_stubbed_stream_session<F>(
+        chunks: Vec<StreamWorkerChunk>,
+        mut synthesize_chunk: F,
+    ) -> Result<(Vec<TtsSynthesisEvent>, TtsResult), MossTtsError>
+    where
+        F: FnMut(
+            &PreparedTextChunk,
+            &mut dyn FnMut(Vec<f32>, bool) -> Result<(), MossTtsError>,
+        ) -> Result<TtsResult, MossTtsError>,
+    {
+        let (chunks_tx, chunks_rx) = std::sync::mpsc::channel();
+        for chunk in chunks {
+            chunks_tx.send(Some(chunk)).unwrap();
+        }
+        chunks_tx.send(None).unwrap();
+        drop(chunks_tx);
+
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = synthesize_stream_chunks(
+            chunks_rx,
+            Arc::new(AtomicBool::new(false)),
+            events_tx,
+            |chunk, emit| synthesize_chunk(chunk, emit),
+        )?;
+
+        Ok((drain_events(&mut events_rx), result))
+    }
+
+    fn drain_events(
+        events_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TtsSynthesisEvent>,
+    ) -> Vec<TtsSynthesisEvent> {
+        let mut events = Vec::new();
+        while let Ok(event) = events_rx.try_recv() {
+            events.push(event);
+        }
+        events
+    }
+
+    fn stream_worker_chunk(text: &str, is_final: bool) -> StreamWorkerChunk {
+        StreamWorkerChunk {
+            chunk: PreparedTextChunk {
+                text: text.to_string(),
+                token_ids: vec![1, 2, 3],
+            },
+            is_final,
+        }
+    }
+
+    fn samples_for_text(text: &str, base: f32) -> Vec<f32> {
+        let frames = text.chars().count().max(1).min(4);
+        let mut samples = Vec::with_capacity(frames * PLAYBACK_CHANNELS as usize);
+        for _ in 0..frames {
+            samples.push(base);
+            samples.push(base + 1.0);
+        }
+        samples
+    }
+
+    fn tts_result(samples: Vec<f32>) -> TtsResult {
+        TtsResult {
+            audio: AudioBuffer {
+                sample_rate_hz: PLAYBACK_SAMPLE_RATE_HZ,
+                channels: PLAYBACK_CHANNELS,
+                pcm: PcmData::F32(samples),
+            },
+        }
+    }
+
+    fn pcm_samples(result: &TtsResult) -> &[f32] {
+        match &result.audio.pcm {
+            PcmData::F32(samples) => samples,
+            PcmData::I16(_) => panic!("stubbed stream should produce f32 PCM"),
+        }
     }
 
     struct MossFixture {

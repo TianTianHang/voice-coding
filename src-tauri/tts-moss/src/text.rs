@@ -13,6 +13,12 @@ pub(crate) struct MossTextPreprocessor {
     max_tokens_per_chunk: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NormalizedText {
+    text: String,
+    preserve_leading_space: bool,
+}
+
 impl Default for MossTextPreprocessor {
     fn default() -> Self {
         Self {
@@ -29,8 +35,9 @@ impl MossTextPreprocessor {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn normalize(&self, text: &str) -> String {
-        normalize_tts_text(text)
+        normalize_tts_text(text).text
     }
 
     pub(crate) fn prepare<F, E>(
@@ -41,22 +48,27 @@ impl MossTextPreprocessor {
     where
         F: FnMut(&str) -> Result<Vec<i64>, E>,
     {
-        let normalized = self.normalize(text);
-        if normalized.is_empty() {
+        let normalized = normalize_tts_text(text);
+        if normalized.text.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut chunks = Vec::new();
-        for sentence in sentence_segments(&normalized) {
+        let mut is_first_sentence = true;
+        for sentence in sentence_segments(&normalized.text) {
+            let preserve_leading_space = normalized.preserve_leading_space && is_first_sentence;
+            is_first_sentence = false;
+            let sentence = trim_chunk_text(sentence, preserve_leading_space);
             let token_ids = encode(sentence)?;
             if token_ids.len() <= self.max_tokens_per_chunk {
-                push_preencoded(&mut chunks, sentence, token_ids);
+                push_preencoded(&mut chunks, sentence, token_ids, preserve_leading_space);
             } else {
                 split_oversized_sentence(
                     sentence,
                     self.max_tokens_per_chunk,
                     &mut encode,
                     &mut chunks,
+                    preserve_leading_space,
                 )?;
             }
         }
@@ -64,7 +76,7 @@ impl MossTextPreprocessor {
     }
 }
 
-fn normalize_tts_text(text: &str) -> String {
+fn normalize_tts_text(text: &str) -> NormalizedText {
     let language = resolve_text_language(text, "");
     let wetext_ready = match language {
         TextLanguage::Zh => rewrite_hyphens_before_zh_wetext(text),
@@ -116,9 +128,15 @@ fn normalize_tts_text(text: &str) -> String {
     }
     let output = prepare_text_for_sentence_chunking(output, language);
     if has_speakable_content(&output) {
-        output
+        NormalizedText {
+            preserve_leading_space: output.starts_with(' '),
+            text: output,
+        }
     } else {
-        String::new()
+        NormalizedText {
+            text: String::new(),
+            preserve_leading_space: false,
+        }
     }
 }
 
@@ -272,16 +290,16 @@ fn sentence_segments(text: &str) -> Vec<&str> {
     for (index, ch) in text.char_indices() {
         if is_sentence_boundary(ch) {
             let end = index + ch.len_utf8();
-            segments.push(text[start..end].trim());
+            segments.push(&text[start..end]);
             start = end;
         }
     }
     if start < text.len() {
-        segments.push(text[start..].trim());
+        segments.push(&text[start..]);
     }
     segments
         .into_iter()
-        .filter(|segment| !segment.is_empty())
+        .filter(|segment| !segment.trim().is_empty())
         .collect()
 }
 
@@ -289,21 +307,24 @@ fn split_text_by_token_budget<F, E>(
     text: &str,
     max_tokens: usize,
     encode: &mut F,
+    preserve_leading_space: bool,
 ) -> Result<Vec<String>, E>
 where
     F: FnMut(&str) -> Result<Vec<i64>, E>,
 {
-    let mut remaining = text.trim();
+    let mut remaining = trim_chunk_text(text, preserve_leading_space).to_string();
     let mut pieces = Vec::new();
     while !remaining.is_empty() {
-        if encode(remaining)?.len() <= max_tokens {
-            pieces.push(remaining.to_string());
+        let preserve_piece_space = preserve_leading_space && pieces.is_empty();
+        let remaining_text = trim_chunk_text(&remaining, preserve_piece_space);
+        if encode(remaining_text)?.len() <= max_tokens {
+            pieces.push(remaining_text.to_string());
             break;
         }
 
         let mut best_prefix_length = 0usize;
-        for (index, _) in remaining.char_indices().skip(1) {
-            let candidate = remaining[..index].trim();
+        for (index, _) in remaining_text.char_indices().skip(1) {
+            let candidate = trim_chunk_text(&remaining_text[..index], preserve_piece_space);
             if !candidate.is_empty() && encode(candidate)?.len() <= max_tokens {
                 best_prefix_length = index;
             } else if best_prefix_length > 0 {
@@ -311,31 +332,31 @@ where
             }
         }
         if best_prefix_length == 0 {
-            best_prefix_length = remaining
+            best_prefix_length = remaining_text
                 .char_indices()
                 .nth(1)
                 .map(|(index, _)| index)
-                .unwrap_or(remaining.len());
+                .unwrap_or(remaining_text.len());
         }
 
-        let prefix = &remaining[..best_prefix_length];
+        let prefix = &remaining_text[..best_prefix_length];
         let scan_min = prefix.len().saturating_sub(25);
         let mut cut_index = best_prefix_length;
         for (index, ch) in prefix.char_indices().rev() {
             if index < scan_min {
                 break;
             }
-            if ch == ' ' || is_soft_boundary(ch) || is_sentence_boundary(ch) {
+            if index > 0 && (ch == ' ' || is_soft_boundary(ch) || is_sentence_boundary(ch)) {
                 cut_index = index + ch.len_utf8();
                 break;
             }
         }
 
-        let piece = remaining[..cut_index].trim();
+        let piece = trim_chunk_text(&remaining_text[..cut_index], preserve_piece_space);
         if !piece.is_empty() {
             pieces.push(piece.to_string());
         }
-        remaining = remaining[cut_index..].trim();
+        remaining = remaining_text[cut_index..].trim().to_string();
     }
     Ok(pieces)
 }
@@ -345,16 +366,25 @@ fn split_oversized_sentence<F, E>(
     max_tokens: usize,
     encode: &mut F,
     chunks: &mut Vec<PreparedTextChunk>,
+    preserve_leading_space: bool,
 ) -> Result<(), E>
 where
     F: FnMut(&str) -> Result<Vec<i64>, E>,
 {
-    for segment in soft_segments(sentence) {
+    for (index, segment) in soft_segments(sentence).into_iter().enumerate() {
+        let preserve_segment_space = preserve_leading_space && index == 0;
         if encode(segment)?.len() <= max_tokens {
-            push_encoded(chunks, encode, segment)?;
+            push_encoded(chunks, encode, segment, preserve_segment_space)?;
         } else {
-            for piece in split_text_by_token_budget(segment, max_tokens, encode)? {
-                push_encoded(chunks, encode, &piece)?;
+            for piece in split_text_by_token_budget(
+                segment,
+                max_tokens,
+                encode,
+                preserve_segment_space,
+            )?
+                .into_iter()
+            {
+                push_encoded(chunks, encode, &piece, piece.starts_with(' '))?;
             }
         }
     }
@@ -367,16 +397,16 @@ fn soft_segments(text: &str) -> Vec<&str> {
     for (index, ch) in text.char_indices() {
         if is_soft_boundary(ch) || is_sentence_boundary(ch) {
             let end = index + ch.len_utf8();
-            segments.push(text[start..end].trim());
+            segments.push(&text[start..end]);
             start = end;
         }
     }
     if start < text.len() {
-        segments.push(text[start..].trim());
+        segments.push(&text[start..]);
     }
     segments
         .into_iter()
-        .filter(|segment| !segment.is_empty())
+        .filter(|segment| !segment.trim().is_empty())
         .collect()
 }
 
@@ -384,11 +414,12 @@ fn push_encoded<F, E>(
     chunks: &mut Vec<PreparedTextChunk>,
     encode: &mut F,
     text: &str,
+    preserve_leading_space: bool,
 ) -> Result<(), E>
 where
     F: FnMut(&str) -> Result<Vec<i64>, E>,
 {
-    let text = text.trim();
+    let text = trim_chunk_text(text, preserve_leading_space);
     if text.is_empty() {
         return Ok(());
     }
@@ -403,8 +434,13 @@ where
     Ok(())
 }
 
-fn push_preencoded(chunks: &mut Vec<PreparedTextChunk>, text: &str, token_ids: Vec<i64>) {
-    let text = text.trim();
+fn push_preencoded(
+    chunks: &mut Vec<PreparedTextChunk>,
+    text: &str,
+    token_ids: Vec<i64>,
+    preserve_leading_space: bool,
+) {
+    let text = trim_chunk_text(text, preserve_leading_space);
     if text.is_empty() || token_ids.is_empty() {
         return;
     }
@@ -412,6 +448,15 @@ fn push_preencoded(chunks: &mut Vec<PreparedTextChunk>, text: &str, token_ids: V
         text: text.to_string(),
         token_ids,
     });
+}
+
+fn trim_chunk_text(text: &str, preserve_leading_space: bool) -> &str {
+    let text = text.trim_end();
+    if preserve_leading_space {
+        text
+    } else {
+        text.trim_start()
+    }
 }
 
 fn merge_prepared_chunks<F, E>(
@@ -543,6 +588,49 @@ mod tests {
     }
 
     #[test]
+    fn preserves_short_english_leading_space_in_prepared_chunk() {
+        let prep = MossTextPreprocessor::default();
+
+        let chunks = prep.prepare("hello world", char_tokens).unwrap();
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![" Hello world."]
+        );
+        assert_eq!(chunks[0].token_ids[0], ' ' as i64);
+    }
+
+    #[test]
+    fn preserves_short_english_leading_space_when_split() {
+        let prep = MossTextPreprocessor::new(6);
+
+        let chunks = prep.prepare("hello world", char_tokens).unwrap();
+
+        assert_eq!(chunks[0].text, " Hello");
+        assert_eq!(chunks[0].token_ids[0], ' ' as i64);
+    }
+
+    #[test]
+    fn leading_space_counts_against_token_budget_when_split() {
+        let prep = MossTextPreprocessor::new(5);
+
+        let chunks = prep.prepare("hello world", char_tokens).unwrap();
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.text.as_str())
+                .collect::<Vec<_>>(),
+            vec![" Hell", "o", "world", "."]
+        );
+        assert!(chunks.iter().all(|chunk| chunk.token_ids.len() <= 5));
+        assert_eq!(chunks[0].token_ids[0], ' ' as i64);
+    }
+
+    #[test]
     fn guards_zh_hyphens_before_text_normalization() {
         let prep = MossTextPreprocessor::default();
 
@@ -612,7 +700,7 @@ mod tests {
                 .iter()
                 .map(|chunk| chunk.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["Abc", "def", "."]
+            vec![" Ab", "cde", "f."]
         );
     }
 
