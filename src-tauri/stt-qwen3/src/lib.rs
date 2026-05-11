@@ -162,6 +162,11 @@ fn stt_result_from_decoded_output(
     tokens_generated: usize,
 ) -> SttResult {
     let parsed = parse_qwen3_output(decoded_text, config.language.as_deref());
+    let rtf = if audio_duration > 0.0 {
+        processing_time / audio_duration
+    } else {
+        0.0
+    };
 
     SttResult {
         text: parsed.text,
@@ -170,7 +175,7 @@ fn stt_result_from_decoded_output(
         timing: TimingInfo {
             audio_duration_sec: audio_duration,
             processing_time_sec: processing_time,
-            rtf: processing_time / audio_duration,
+            rtf,
             tokens_generated: Some(tokens_generated),
         },
     }

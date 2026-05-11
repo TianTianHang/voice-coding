@@ -1,7 +1,7 @@
 use std::io::Cursor;
 use std::path::Path;
 
-use symphonia::core::audio::AudioBufferRef;
+use symphonia::core::audio::{AudioBufferRef, SampleBuffer};
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::FormatOptions;
@@ -172,82 +172,20 @@ pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
     Ok(all_samples)
 }
 
-fn append_samples(decoded: &AudioBufferRef, channels: usize, output: &mut Vec<f32>) {
-    use symphonia::core::audio::Signal;
-
-    match decoded {
-        AudioBufferRef::U8(buf) => {
-            let samples: Vec<f32> = buf
-                .as_ref()
-                .chan(0)
-                .iter()
-                .map(|&s| s as f32 / 255.0)
-                .collect();
-            if channels > 1 {
-                downmix_interleaved(&samples, channels, output);
-            } else {
-                output.extend_from_slice(&samples);
-            }
-        }
-        AudioBufferRef::S16(buf) => {
-            let samples: Vec<f32> = buf
-                .as_ref()
-                .chan(0)
-                .iter()
-                .map(|&s| s as f32 / 32768.0)
-                .collect();
-            if channels > 1 {
-                downmix_interleaved(&samples, channels, output);
-            } else {
-                output.extend_from_slice(&samples);
-            }
-        }
-        AudioBufferRef::S24(buf) => {
-            let samples: Vec<f32> = buf
-                .as_ref()
-                .chan(0)
-                .iter()
-                .map(|&s| {
-                    let si24: i32 = unsafe { std::mem::transmute(s) };
-                    si24 as f32 / (1 << 23) as f32
-                })
-                .collect();
-            if channels > 1 {
-                downmix_interleaved(&samples, channels, output);
-            } else {
-                output.extend_from_slice(&samples);
-            }
-        }
-        AudioBufferRef::S32(buf) => {
-            let samples: Vec<f32> = buf
-                .as_ref()
-                .chan(0)
-                .iter()
-                .map(|&s| s as f32 / 2147483648.0)
-                .collect();
-            if channels > 1 {
-                downmix_interleaved(&samples, channels, output);
-            } else {
-                output.extend_from_slice(&samples);
-            }
-        }
-        AudioBufferRef::F32(buf) => {
-            let samples: Vec<f32> = buf.as_ref().chan(0).to_vec();
-            if channels > 1 {
-                downmix_interleaved(&samples, channels, output);
-            } else {
-                output.extend_from_slice(&samples);
-            }
-        }
-        AudioBufferRef::F64(buf) => {
-            let samples: Vec<f32> = buf.as_ref().chan(0).iter().map(|&s| s as f32).collect();
-            if channels > 1 {
-                downmix_interleaved(&samples, channels, output);
-            } else {
-                output.extend_from_slice(&samples);
-            }
-        }
-        _ => {}
+fn append_samples(decoded: &AudioBufferRef, channels_hint: usize, output: &mut Vec<f32>) {
+    let channels = decoded
+        .spec()
+        .channels
+        .count()
+        .max(channels_hint)
+        .max(1);
+    let mut sample_buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+    sample_buffer.copy_interleaved_ref(decoded.clone());
+    let samples = sample_buffer.samples();
+    if channels > 1 {
+        downmix_interleaved(samples, channels, output);
+    } else {
+        output.extend_from_slice(samples);
     }
 }
 
@@ -259,6 +197,12 @@ fn downmix_interleaved(samples: &[f32], channels: usize, output: &mut Vec<f32>) 
 }
 
 pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>, SttError> {
+    if from_rate == 0 || to_rate == 0 {
+        return Err(SttError::AudioLoadError(format!(
+            "sample rates must be greater than zero, got {from_rate} -> {to_rate}"
+        )));
+    }
+
     if from_rate == to_rate {
         return Ok(samples.to_vec());
     }
@@ -285,6 +229,12 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32
 }
 
 pub fn validate_samples(samples: &[f32], sample_rate: u32) -> Result<(), SttError> {
+    if sample_rate == 0 {
+        return Err(SttError::AudioLoadError(
+            "sample rate must be greater than zero".into(),
+        ));
+    }
+
     if samples.is_empty() {
         return Err(SttError::AudioLoadError("Audio contains no samples".into()));
     }
@@ -365,5 +315,19 @@ mod tests {
         assert_eq!(output.len(), 2);
         assert!((output[0] - 2.0f32).abs() < 1e-6);
         assert!((output[1] - 3.0f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_validate_samples_rejects_zero_sample_rate() {
+        let samples = vec![0.5f32; 16000];
+        let result = validate_samples(&samples, 0);
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("sample rate"));
+    }
+
+    #[test]
+    fn test_resample_rejects_zero_sample_rate() {
+        let result = resample(&[0.5f32; 16], 0, 16000);
+        assert!(result.is_err());
     }
 }

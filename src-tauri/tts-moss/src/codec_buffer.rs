@@ -11,7 +11,14 @@ impl PcmChunkBuffer {
     }
 
     fn into_tts_result(self) -> Result<TtsResult, MossTtsError> {
-        let mut pcm = Vec::new();
+        let total_samples = self
+            .chunks
+            .iter()
+            .try_fold(0usize, |total, chunk| total.checked_add(chunk.len()))
+            .ok_or_else(|| {
+                MossTtsError::OutputFormat("streaming decode PCM length overflowed usize".to_string())
+            })?;
+        let mut pcm = Vec::with_capacity(total_samples);
         for mut chunk in self.chunks {
             pcm.append(&mut chunk);
         }

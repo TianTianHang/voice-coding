@@ -141,9 +141,28 @@ impl EmbeddingMatrix {
         })
     }
 
-    pub fn get_embedding(&self, token_id: u32) -> &[f32] {
+    pub fn get_embedding(&self, token_id: u32) -> Result<&[f32], SttError> {
+        if token_id as usize >= self.vocab_size {
+            return Err(SttError::InferenceError {
+                model: "embed_tokens".into(),
+                detail: format!(
+                    "token id {} is outside embedding vocabulary size {}",
+                    token_id, self.vocab_size
+                ),
+            });
+        }
+
         let start = token_id as usize * self.hidden_size;
-        &self.data[start..start + self.hidden_size]
+        let end = start + self.hidden_size;
+        self.data
+            .get(start..end)
+            .ok_or_else(|| SttError::InferenceError {
+                model: "embed_tokens".into(),
+                detail: format!(
+                    "embedding slice for token id {} is outside matrix bounds",
+                    token_id
+                ),
+            })
     }
 }
 

@@ -206,8 +206,8 @@ fn synthesize_chunks(
 }
 
 fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTtsError> {
-    let mut pcm = Vec::new();
-    for result in results {
+    let mut total_samples = 0usize;
+    for result in &results {
         if result.audio.sample_rate_hz != PLAYBACK_SAMPLE_RATE_HZ
             || result.audio.channels != PLAYBACK_CHANNELS
         {
@@ -216,8 +216,12 @@ fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTts
                 PLAYBACK_SAMPLE_RATE_HZ, result.audio.sample_rate_hz, result.audio.channels
             )));
         }
-        match result.audio.pcm {
-            PcmData::F32(mut samples) => pcm.append(&mut samples),
+        match &result.audio.pcm {
+            PcmData::F32(samples) => {
+                total_samples = total_samples.checked_add(samples.len()).ok_or_else(|| {
+                    MossTtsError::OutputFormat("chunk PCM length overflowed usize".to_string())
+                })?;
+            }
             PcmData::I16(_) => {
                 return Err(MossTtsError::OutputFormat(
                     "MOSS chunk audio must use f32 PCM".to_string(),
@@ -225,11 +229,17 @@ fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTts
             }
         }
     }
-    if pcm.is_empty() {
+    if total_samples == 0 {
         return Err(MossTtsError::Inference {
             stage: "tts_concat_chunks",
             detail: "MOSS chunks produced no audio".to_string(),
         });
+    }
+    let mut pcm = Vec::with_capacity(total_samples);
+    for result in results {
+        if let PcmData::F32(mut samples) = result.audio.pcm {
+            pcm.append(&mut samples);
+        }
     }
     Ok(TtsResult {
         audio: AudioBuffer {

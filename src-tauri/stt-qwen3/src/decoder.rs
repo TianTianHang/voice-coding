@@ -35,7 +35,7 @@ pub fn embed_and_fuse(
             }
             audio_idx += 1;
         } else {
-            let emb = embeddings.get_embedding(token_id);
+            let emb = embeddings.get_embedding(token_id)?;
             for (d, &v) in emb.iter().enumerate() {
                 input_embeds[[0, pos, d]] = v;
             }
@@ -215,7 +215,7 @@ pub fn decoder_step(
     embeddings: &EmbeddingMatrix,
     sessions: &mut crate::models::session::OnnxSessions,
 ) -> Result<(u32, KvCache), SttError> {
-    let emb = embeddings.get_embedding(token_id);
+    let emb = embeddings.get_embedding(token_id)?;
     let input_embeds =
         ndarray::Array3::from_shape_vec((1, 1, emb.len()), emb.to_vec()).map_err(|e| {
             SttError::InferenceError {
@@ -380,6 +380,13 @@ pub(crate) fn greedy_decode_logits(
         });
     }
 
+    if batch_size != 1 {
+        return Err(SttError::InferenceError {
+            model: model.into(),
+            detail: format!("Expected batch size 1 for logits, got {}", batch_size),
+        });
+    }
+
     let last_position_start = (seq_len - 1) * vocab_size;
     let last_logits = &logits_data[last_position_start..last_position_start + vocab_size];
     let mut max_idx = 0usize;
@@ -515,7 +522,7 @@ mod tests {
 
         assert_eq!(result.shape(), &[1, 4, 1024]);
         for (pos, &token_id) in token_ids.iter().enumerate() {
-            let emb = embeddings.get_embedding(token_id);
+            let emb = embeddings.get_embedding(token_id).unwrap();
             for d in 0..1024 {
                 assert_eq!(result[[0, pos, d]], emb[d]);
             }
@@ -677,7 +684,7 @@ mod tests {
         };
 
         let embeddings = create_test_embeddings(1024);
-        let _emb = embeddings.get_embedding(151644);
+        let _emb = embeddings.get_embedding(151644).unwrap();
 
         assert_eq!(initial_cache.keys.shape()[3], 5);
     }
@@ -692,9 +699,25 @@ mod tests {
     fn test_decoder_step_embedding_lookup() {
         let embeddings = create_test_embeddings(1024);
         let token_id = 151644;
-        let emb = embeddings.get_embedding(token_id);
+        let emb = embeddings.get_embedding(token_id).unwrap();
 
         assert_eq!(emb.len(), 1024);
+    }
+
+    #[test]
+    fn test_embedding_lookup_rejects_out_of_range_token() {
+        let embeddings = create_test_embeddings(4);
+        let err = embeddings.get_embedding(151936).unwrap_err();
+
+        assert!(format!("{err}").contains("outside embedding vocabulary"));
+    }
+
+    #[test]
+    fn test_greedy_decode_rejects_multi_batch_logits() {
+        let result = greedy_decode_logits(&[2, 1, 3], &[0.0; 6], "test");
+
+        assert!(result.is_err());
+        assert!(format!("{}", result.unwrap_err()).contains("batch size 1"));
     }
 
     #[test]
