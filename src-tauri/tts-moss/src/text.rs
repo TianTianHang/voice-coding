@@ -1,6 +1,6 @@
 use crate::robust::normalize_robust_text;
 
-const DEFAULT_MAX_TOKENS_PER_CHUNK: usize = 180;
+const DEFAULT_MAX_TOKENS_PER_CHUNK: usize = 75;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PreparedTextChunk {
@@ -60,12 +60,19 @@ impl MossTextPreprocessor {
                 )?;
             }
         }
-        Ok(chunks)
+        merge_prepared_chunks(chunks, self.max_tokens_per_chunk, &mut encode)
     }
 }
 
 fn normalize_tts_text(text: &str) -> String {
-    let text = normalize_robust_text(text);
+    let language = resolve_text_language(text, "");
+    let wetext_ready = match language {
+        TextLanguage::Zh => rewrite_hyphens_before_zh_wetext(text),
+        TextLanguage::En => text.to_string(),
+    };
+    let robust_pre = normalize_robust_text(&wetext_ready);
+    let language = resolve_text_language(&robust_pre, "");
+    let text = robust_pre;
     let mut normalized = String::with_capacity(text.len());
     let mut last_was_space = true;
 
@@ -107,11 +114,135 @@ fn normalize_tts_text(text: &str) -> String {
         output.push(ch);
         previous = Some(ch);
     }
-    let output = ensure_terminal_sentence_punctuation(output);
+    let output = prepare_text_for_sentence_chunking(output, language);
     if has_speakable_content(&output) {
         output
     } else {
         String::new()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextLanguage {
+    Zh,
+    En,
+}
+
+fn resolve_text_language(text: &str, voice: &str) -> TextLanguage {
+    if text.chars().any(is_cjk) {
+        return TextLanguage::Zh;
+    }
+    if text.chars().any(|ch| ch.is_ascii_alphabetic()) {
+        return TextLanguage::En;
+    }
+    if matches!(voice, "Trump" | "Ava" | "Bella" | "Adam" | "Nathan") {
+        TextLanguage::En
+    } else {
+        TextLanguage::Zh
+    }
+}
+
+fn rewrite_hyphens_before_zh_wetext(text: &str) -> String {
+    if !text.contains('-') {
+        return text.to_string();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut output = String::with_capacity(text.len());
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch != '-' {
+            output.push(ch);
+            continue;
+        }
+
+        let previous = previous_non_space(&chars, index);
+        let next = next_non_space(&chars, index);
+        if next.is_some_and(|next| next.is_ascii_digit())
+            && (index == 0
+                || previous.is_none()
+                || previous.is_some_and(|prev| {
+                    prev.is_ascii_digit()
+                        || is_cjk(prev)
+                        || matches!(prev, '=' | ':' | '+' | '*' | '/' | ',' | '(' | '[' | '{')
+                }))
+        {
+            if previous.is_some_and(is_cjk) {
+                output.push(' ');
+            }
+            output.push('-');
+        } else if previous.is_some_and(is_cjk) && next.is_some_and(is_cjk) {
+            output.push(',');
+        } else if previous.is_some_and(|prev| !prev.is_whitespace())
+            && next.is_some_and(|next| !next.is_whitespace())
+        {
+            output.push(' ');
+        } else {
+            output.push(ch);
+        }
+    }
+
+    collapse_ascii_spaces(&output)
+}
+
+fn previous_non_space(chars: &[char], index: usize) -> Option<char> {
+    chars[..index]
+        .iter()
+        .rev()
+        .copied()
+        .find(|ch| !ch.is_whitespace())
+}
+
+fn next_non_space(chars: &[char], index: usize) -> Option<char> {
+    chars[index + 1..]
+        .iter()
+        .copied()
+        .find(|ch| !ch.is_whitespace())
+}
+
+fn collapse_ascii_spaces(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut last_was_space = true;
+    for ch in text.chars() {
+        if ch == ' ' {
+            if !last_was_space {
+                output.push(ch);
+            }
+            last_was_space = true;
+        } else {
+            output.push(ch);
+            last_was_space = false;
+        }
+    }
+    output.trim().to_string()
+}
+
+fn prepare_text_for_sentence_chunking(mut text: String, language: TextLanguage) -> String {
+    if text.is_empty() {
+        return text;
+    }
+    match language {
+        TextLanguage::Zh => {
+            if !text.ends_with(is_terminal_sentence_punctuation) {
+                text.push('\u{3002}');
+            }
+            text
+        }
+        TextLanguage::En => {
+            if let Some((index, ch)) = text.char_indices().find(|(_, ch)| ch.is_alphabetic()) {
+                if ch.is_lowercase() {
+                    let upper = ch.to_uppercase().to_string();
+                    text.replace_range(index..index + ch.len_utf8(), &upper);
+                }
+            }
+            if text.ends_with(|ch: char| ch.is_alphanumeric()) {
+                text.push('.');
+            }
+            if text.split_whitespace().count() < 5 {
+                format!(" {text}")
+            } else {
+                text
+            }
+        }
     }
 }
 
@@ -154,6 +285,61 @@ fn sentence_segments(text: &str) -> Vec<&str> {
         .collect()
 }
 
+fn split_text_by_token_budget<F, E>(
+    text: &str,
+    max_tokens: usize,
+    encode: &mut F,
+) -> Result<Vec<String>, E>
+where
+    F: FnMut(&str) -> Result<Vec<i64>, E>,
+{
+    let mut remaining = text.trim();
+    let mut pieces = Vec::new();
+    while !remaining.is_empty() {
+        if encode(remaining)?.len() <= max_tokens {
+            pieces.push(remaining.to_string());
+            break;
+        }
+
+        let mut best_prefix_length = 0usize;
+        for (index, _) in remaining.char_indices().skip(1) {
+            let candidate = remaining[..index].trim();
+            if !candidate.is_empty() && encode(candidate)?.len() <= max_tokens {
+                best_prefix_length = index;
+            } else if best_prefix_length > 0 {
+                break;
+            }
+        }
+        if best_prefix_length == 0 {
+            best_prefix_length = remaining
+                .char_indices()
+                .nth(1)
+                .map(|(index, _)| index)
+                .unwrap_or(remaining.len());
+        }
+
+        let prefix = &remaining[..best_prefix_length];
+        let scan_min = prefix.len().saturating_sub(25);
+        let mut cut_index = best_prefix_length;
+        for (index, ch) in prefix.char_indices().rev() {
+            if index < scan_min {
+                break;
+            }
+            if ch == ' ' || is_soft_boundary(ch) || is_sentence_boundary(ch) {
+                cut_index = index + ch.len_utf8();
+                break;
+            }
+        }
+
+        let piece = remaining[..cut_index].trim();
+        if !piece.is_empty() {
+            pieces.push(piece.to_string());
+        }
+        remaining = remaining[cut_index..].trim();
+    }
+    Ok(pieces)
+}
+
 fn split_oversized_sentence<F, E>(
     sentence: &str,
     max_tokens: usize,
@@ -163,25 +349,16 @@ fn split_oversized_sentence<F, E>(
 where
     F: FnMut(&str) -> Result<Vec<i64>, E>,
 {
-    let mut current = String::new();
     for segment in soft_segments(sentence) {
-        let candidate = join_segment(&current, segment);
-        if !candidate.trim().is_empty() && encode(&candidate)?.len() <= max_tokens {
-            current = candidate;
-            continue;
-        }
-
-        push_encoded(chunks, encode, &current)?;
-        current.clear();
-
-        let segment_tokens = encode(segment)?;
-        if segment_tokens.len() <= max_tokens {
-            current.push_str(segment.trim());
+        if encode(segment)?.len() <= max_tokens {
+            push_encoded(chunks, encode, segment)?;
         } else {
-            split_oversized_segment(segment, max_tokens, encode, chunks)?;
+            for piece in split_text_by_token_budget(segment, max_tokens, encode)? {
+                push_encoded(chunks, encode, &piece)?;
+            }
         }
     }
-    push_encoded(chunks, encode, &current)
+    Ok(())
 }
 
 fn soft_segments(text: &str) -> Vec<&str> {
@@ -201,27 +378,6 @@ fn soft_segments(text: &str) -> Vec<&str> {
         .into_iter()
         .filter(|segment| !segment.is_empty())
         .collect()
-}
-
-fn split_oversized_segment<F, E>(
-    segment: &str,
-    max_tokens: usize,
-    encode: &mut F,
-    chunks: &mut Vec<PreparedTextChunk>,
-) -> Result<(), E>
-where
-    F: FnMut(&str) -> Result<Vec<i64>, E>,
-{
-    let mut current = String::new();
-    for ch in segment.chars() {
-        let candidate = format!("{current}{ch}");
-        if !current.is_empty() && encode(&candidate)?.len() > max_tokens {
-            push_encoded(chunks, encode, &current)?;
-            current.clear();
-        }
-        current.push(ch);
-    }
-    push_encoded(chunks, encode, &current)
 }
 
 fn push_encoded<F, E>(
@@ -258,6 +414,48 @@ fn push_preencoded(chunks: &mut Vec<PreparedTextChunk>, text: &str, token_ids: V
     });
 }
 
+fn merge_prepared_chunks<F, E>(
+    slices: Vec<PreparedTextChunk>,
+    max_tokens: usize,
+    encode: &mut F,
+) -> Result<Vec<PreparedTextChunk>, E>
+where
+    F: FnMut(&str) -> Result<Vec<i64>, E>,
+{
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_tokens = Vec::new();
+
+    for slice in slices {
+        if current.is_empty() {
+            current = slice.text;
+            current_tokens = slice.token_ids;
+            continue;
+        }
+        let candidate = join_segment(&current, &slice.text);
+        let candidate_tokens = encode(&candidate)?;
+        if candidate_tokens.len() > max_tokens {
+            chunks.push(PreparedTextChunk {
+                text: current,
+                token_ids: current_tokens,
+            });
+            current = slice.text;
+            current_tokens = slice.token_ids;
+        } else {
+            current = candidate;
+            current_tokens = candidate_tokens;
+        }
+    }
+
+    if !current.is_empty() && !current_tokens.is_empty() {
+        chunks.push(PreparedTextChunk {
+            text: current,
+            token_ids: current_tokens,
+        });
+    }
+    Ok(chunks)
+}
+
 fn join_segment(current: &str, segment: &str) -> String {
     let segment = segment.trim();
     if current.is_empty() {
@@ -276,14 +474,6 @@ fn is_soft_boundary(ch: char) -> bool {
         ch,
         ',' | ';' | ':' | '\n' | '\r' | '\u{ff0c}' | '\u{3001}' | '\u{ff1b}' | '\u{ff1a}'
     )
-}
-
-fn ensure_terminal_sentence_punctuation(mut text: String) -> String {
-    if text.is_empty() || text.ends_with(is_terminal_sentence_punctuation) {
-        return text;
-    }
-    text.push('\u{3002}');
-    text
 }
 
 fn is_terminal_sentence_punctuation(ch: char) -> bool {
@@ -337,12 +527,33 @@ mod tests {
 
         assert_eq!(prep.normalize("你好"), "你好。");
         assert_eq!(prep.normalize("你好。"), "你好。");
-        assert_eq!(prep.normalize("hello?"), "hello?");
+        assert_eq!(prep.normalize("hello?"), " Hello?");
         assert_eq!(prep.normalize("暂停，"), "暂停,。");
     }
 
     #[test]
-    fn chunks_one_sentence_per_synthesis_chunk() {
+    fn normalizes_english_like_official_runtime() {
+        let prep = MossTextPreprocessor::default();
+
+        assert_eq!(prep.normalize("hello world"), " Hello world.");
+        assert_eq!(
+            prep.normalize("this is a longer english sentence"),
+            "This is a longer english sentence."
+        );
+    }
+
+    #[test]
+    fn guards_zh_hyphens_before_text_normalization() {
+        let prep = MossTextPreprocessor::default();
+
+        assert_eq!(
+            prep.normalize("语音-编码 版本-2 -3"),
+            "语音,编码 版本 -2 -3。"
+        );
+    }
+
+    #[test]
+    fn merges_short_sentences_up_to_token_budget() {
         let prep = MossTextPreprocessor::new(100);
 
         let chunks = prep
@@ -354,12 +565,12 @@ mod tests {
                 .iter()
                 .map(|chunk| chunk.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["第一句很短。", "第二句也短。", "third sentence."]
+            vec!["第一句很短。 第二句也短。 third sentence."]
         );
     }
 
     #[test]
-    fn keeps_soft_boundaries_inside_normal_length_sentence() {
+    fn merges_sentence_boundaries_inside_token_budget() {
         let prep = MossTextPreprocessor::new(100);
 
         let chunks = prep
@@ -371,7 +582,7 @@ mod tests {
                 .iter()
                 .map(|chunk| chunk.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["第一段,包含逗号:但仍然是一句。", "第二句。"]
+            vec!["第一段,包含逗号:但仍然是一句。 第二句。"]
         );
     }
 
@@ -401,7 +612,7 @@ mod tests {
                 .iter()
                 .map(|chunk| chunk.text.as_str())
                 .collect::<Vec<_>>(),
-            vec!["abc", "def", "\u{3002}"]
+            vec!["Abc", "def", "."]
         );
     }
 

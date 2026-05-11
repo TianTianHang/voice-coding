@@ -12,7 +12,8 @@ pub(crate) fn normalize_robust_text(text: &str) -> String {
     let linked = simplify_markdown_links(&markdown);
     let inline_code = linked.replace('`', "");
     let (protected, spans) = protect_spans(&inline_code);
-    let symbols = normalize_symbols(&protected);
+    let readable = normalize_readable_units(&protected);
+    let symbols = normalize_symbols(&readable);
     let restored = restore_spans(&symbols, &spans);
     collapse_spacing_and_punctuation(&restored)
 }
@@ -354,6 +355,10 @@ fn normalize_symbols(text: &str) -> String {
 
         match ch {
             '-' | '\u{2013}' | '\u{2014}' | '\u{2015}' => {
+                if next_non_space_from_iter(&chars).is_some_and(|next| next.is_ascii_digit()) {
+                    output.push('-');
+                    continue;
+                }
                 while matches!(
                     chars.peek(),
                     Some('-' | '\u{2013}' | '\u{2014}' | '\u{2015}' | '>')
@@ -378,6 +383,83 @@ fn normalize_symbols(text: &str) -> String {
     }
 
     output
+}
+
+fn next_non_space_from_iter<I>(chars: &std::iter::Peekable<I>) -> Option<char>
+where
+    I: Iterator<Item = char> + Clone,
+{
+    let mut probe = chars.clone();
+    probe.find(|ch| !ch.is_whitespace())
+}
+
+fn normalize_readable_units(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch == PROTECTED_START {
+            output.push(ch);
+            index += 1;
+            while index < chars.len() {
+                output.push(chars[index]);
+                if chars[index] == PROTECTED_END {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+
+        if ch == '%' {
+            output.push_str(" percent ");
+            index += 1;
+            continue;
+        }
+        if ch == '&' {
+            output.push_str(" and ");
+            index += 1;
+            continue;
+        }
+        if ch == '+' && surrounding_ascii_alnum(&chars, index) {
+            output.push_str(" plus ");
+            index += 1;
+            continue;
+        }
+        if ch == '=' && surrounding_ascii_alnum(&chars, index) {
+            output.push_str(" equals ");
+            index += 1;
+            continue;
+        }
+
+        output.push(ch);
+        index += 1;
+    }
+
+    output
+}
+
+fn surrounding_ascii_alnum(chars: &[char], index: usize) -> bool {
+    previous_non_space(chars, index).is_some_and(|ch| ch.is_ascii_alphanumeric())
+        && next_non_space(chars, index).is_some_and(|ch| ch.is_ascii_alphanumeric())
+}
+
+fn previous_non_space(chars: &[char], index: usize) -> Option<char> {
+    chars[..index]
+        .iter()
+        .rev()
+        .copied()
+        .find(|ch| !ch.is_whitespace())
+}
+
+fn next_non_space(chars: &[char], index: usize) -> Option<char> {
+    chars[index + 1..]
+        .iter()
+        .copied()
+        .find(|ch| !ch.is_whitespace())
 }
 
 fn restore_spans(text: &str, spans: &[ProtectedSpan]) -> String {
@@ -504,6 +586,14 @@ mod tests {
         assert_eq!(
             normalize_robust_text("a -> b —— c？？！！\u{200b}\u{0007}"),
             "a。 b。 c?!"
+        );
+    }
+
+    #[test]
+    fn makes_common_units_and_operators_readable() {
+        assert_eq!(
+            normalize_robust_text("CPU 80% A+B x=3 rock & roll"),
+            "CPU 80 percent A plus B x equals 3 rock and roll"
         );
     }
 }
