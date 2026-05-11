@@ -18,12 +18,15 @@
 - **WHEN** session 已产生合成进度、文本边界、音频 chunk 或结束结果
 - **THEN** 调用方 SHALL 能通过 `next_event` 拉取下一个事件
 - **AND** 无可用事件时 `next_event` SHALL 返回空结果而不是阻塞到最终合成完成
+- **AND** 空结果 SHALL 表示当前暂无可消费事件，不表示 session 已结束
+- **AND** 调用方 SHOULD 通过输入推进、定时轮询或等待式封装避免忙等
 
 #### Scenario: 结束流式合成
 - **WHEN** 调用方调用 `finish`
 - **THEN** session SHALL 完成剩余文本处理
 - **AND** session SHALL 返回最终完整 `TtsResult`
 - **AND** 最终音频 SHALL 仍满足 48kHz 立体声播放契约
+- **AND** 如果事件流也产生 `End` 事件，`End` 携带的 `TtsResult` SHALL 与 `finish` 返回的最终结果一致
 
 #### Scenario: 取消流式合成
 - **WHEN** 调用方调用 `cancel`

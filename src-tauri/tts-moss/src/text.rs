@@ -268,10 +268,7 @@ fn join_segment(current: &str, segment: &str) -> String {
 }
 
 fn is_sentence_boundary(ch: char) -> bool {
-    matches!(
-        ch,
-        '.' | '!' | '?' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}'
-    )
+    matches!(ch, '.' | '!' | '?' | '\u{3002}' | '\u{ff01}' | '\u{ff1f}')
 }
 
 fn is_soft_boundary(ch: char) -> bool {
@@ -382,9 +379,7 @@ mod tests {
     fn splits_oversized_sentence_on_soft_boundaries() {
         let prep = MossTextPreprocessor::new(8);
 
-        let chunks = prep
-            .prepare("第一段,第二段,第三段。", char_tokens)
-            .unwrap();
+        let chunks = prep.prepare("第一段,第二段,第三段。", char_tokens).unwrap();
 
         assert_eq!(
             chunks
@@ -415,6 +410,9 @@ mod tests {
         let prep = MossTextPreprocessor::default();
 
         assert_eq!(prep.normalize("```---!!!```"), "");
-        assert!(prep.prepare(" -> --- !!! ", char_tokens).unwrap().is_empty());
+        assert!(prep
+            .prepare(" -> --- !!! ", char_tokens)
+            .unwrap()
+            .is_empty());
     }
 }

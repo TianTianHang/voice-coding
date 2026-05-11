@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use ndarray::{s, Array1, Array2, Array3, ArrayD, IxDyn};
@@ -11,12 +14,13 @@ use ort::value::{DynValue, TensorRef, Value};
 use sentencepiece::SentencePieceProcessor;
 use serde::Deserialize;
 use tts_core::{
-    AudioBuffer, PcmData, TtsConfig, TtsEngine, TtsError, TtsResult, PLAYBACK_CHANNELS,
-    PLAYBACK_SAMPLE_RATE_HZ,
+    AudioBuffer, PcmData, StreamingTextChunk, StreamingTts, StreamingTtsSession, TtsAudioChunk,
+    TtsConfig, TtsEngine, TtsError, TtsResult, TtsSynthesisEvent, TtsSynthesisProgress,
+    TtsSynthesisStarted, TtsTextBoundary, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ,
 };
 
-mod text;
 mod robust;
+mod text;
 
 use text::{MossTextPreprocessor, PreparedTextChunk};
 
@@ -30,6 +34,7 @@ include!("sampling.rs");
 include!("assets.rs");
 include!("engine.rs");
 include!("codec_buffer.rs");
+include!("streaming.rs");
 include!("sessions.rs");
 include!("metadata.rs");
 
@@ -295,7 +300,7 @@ mod tests {
         assert_eq!(state.transformer_offsets[0].shape, vec![1]);
         assert_eq!(state.transformer_offsets[0].data, vec![0]);
         assert_eq!(state.attention_caches[0].keys.shape, vec![1, 4, 8, 64]);
-        assert_eq!(state.attention_caches[0].keys.data.len(), 1 * 4 * 8 * 64);
+        assert_eq!(state.attention_caches[0].keys.data.len(), 4 * 8 * 64);
         assert!(state.input_names().contains(&"transformer_offset_0"));
         assert!(state.output_names().contains(&"attn_cached_values_out_0"));
     }
@@ -356,14 +361,14 @@ mod tests {
             "attn_cached_keys_out_0".to_string(),
             OwnedTensorData::F32 {
                 shape: vec![1, 4, 2, 64],
-                data: vec![0.5; 1 * 4 * 2 * 64],
+                data: vec![0.5; 4 * 2 * 64],
             },
         );
         outputs.insert(
             "attn_cached_values_out_0".to_string(),
             OwnedTensorData::F32 {
                 shape: vec![1, 4, 2, 64],
-                data: vec![0.25; 1 * 4 * 2 * 64],
+                data: vec![0.25; 4 * 2 * 64],
             },
         );
         outputs.insert(
@@ -408,7 +413,7 @@ mod tests {
 
     #[test]
     fn full_codec_decode_is_the_default_output_path() {
-        assert!(!USE_CODEC_DECODE_STEP_BY_DEFAULT);
+        const { assert!(!USE_CODEC_DECODE_STEP_BY_DEFAULT) };
     }
 
     #[test]
@@ -436,6 +441,52 @@ mod tests {
         let err = buffer.into_tts_result().unwrap_err();
 
         assert!(err.to_string().contains("stereo"));
+    }
+
+    #[test]
+    fn frame_budget_starts_small_expands_and_flushes_to_metadata_limit() {
+        let mut budget = FrameBudget::new(8, Some(10));
+
+        assert_eq!(budget.next_batch_size(false), 1);
+        budget.record_pcm_samples(960);
+        assert_eq!(budget.next_batch_size(false), 2);
+        budget.record_pcm_samples(960);
+        assert_eq!(budget.next_batch_size(false), 4);
+        budget.record_pcm_samples(1_920);
+        assert_eq!(budget.next_batch_size(false), 8);
+        assert_eq!(budget.next_batch_size(true), 8);
+    }
+
+    #[test]
+    fn frame_budget_never_exceeds_metadata_batch_limit() {
+        let mut budget = FrameBudget::new(2, Some(10));
+        budget.record_pcm_samples(10_000);
+
+        assert_eq!(budget.next_batch_size(false), 2);
+        assert_eq!(budget.next_batch_size(true), 2);
+    }
+
+    #[test]
+    fn streaming_audio_chunk_event_has_sequence_format_and_time_range() {
+        let mut produced_samples = 0;
+        let event =
+            make_audio_chunk_event(3, vec![0.0, 0.1, 0.2, 0.3], &mut produced_samples, 5, true);
+
+        let TtsSynthesisEvent::AudioChunk(chunk) = event else {
+            panic!("expected audio chunk event");
+        };
+        assert_eq!(chunk.sequence, 3);
+        assert_eq!(chunk.audio.sample_rate_hz, PLAYBACK_SAMPLE_RATE_HZ);
+        assert_eq!(chunk.audio.channels, PLAYBACK_CHANNELS);
+        assert_eq!(chunk.start_time_sec, Some(0.0));
+        assert_eq!(
+            chunk.end_time_sec,
+            Some(2.0 / PLAYBACK_SAMPLE_RATE_HZ as f64)
+        );
+        assert_eq!(chunk.text_start, Some(0));
+        assert_eq!(chunk.text_end, Some(5));
+        assert!(chunk.is_final);
+        assert!(matches!(chunk.audio.pcm, PcmData::F32(samples) if samples.len() == 4));
     }
 
     #[test]

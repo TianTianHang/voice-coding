@@ -146,6 +146,47 @@ impl MossSessions {
         self.decode_generated_frames(generated_frames)
     }
 
+    fn synthesize_streaming_frames<F>(
+        &mut self,
+        assets: &MossAssets,
+        request: MossRequestRows,
+        sampling_mode: MossSamplingMode,
+        requested_chunk_ms: Option<u32>,
+        mut on_pcm_chunk: F,
+    ) -> Result<TtsResult, MossTtsError>
+    where
+        F: FnMut(Vec<f32>, bool) -> Result<(), MossTtsError>,
+    {
+        let mut state = self.codec_decode_step_state.clone();
+        let mut pending_frames: Vec<Vec<i64>> = Vec::new();
+        let mut budget = FrameBudget::new(state.batch_size, requested_chunk_ms);
+        let mut buffer = PcmChunkBuffer::default();
+
+        self.generate_audio_frames_with_callback(assets, request, sampling_mode, |sessions, frame| {
+            pending_frames.push(frame.to_vec());
+            if pending_frames.len() >= budget.next_batch_size(false) {
+                let frames = std::mem::take(&mut pending_frames);
+                let chunk = sessions.run_codec_decode_step_batch(&frames, &mut state)?;
+                budget.record_pcm_samples(chunk.len());
+                buffer.push_chunk(chunk.clone());
+                on_pcm_chunk(chunk, false)?;
+            }
+            Ok(())
+        })?;
+
+        while !pending_frames.is_empty() {
+            let take = budget.next_batch_size(true).min(pending_frames.len());
+            let frames = pending_frames.drain(..take).collect::<Vec<_>>();
+            let is_final = pending_frames.is_empty();
+            let chunk = self.run_codec_decode_step_batch(&frames, &mut state)?;
+            budget.record_pcm_samples(chunk.len());
+            buffer.push_chunk(chunk.clone());
+            on_pcm_chunk(chunk, is_final)?;
+        }
+
+        buffer.into_tts_result()
+    }
+
     fn decode_generated_frames(
         &mut self,
         generated_frames: Vec<Vec<i64>>,
@@ -259,6 +300,24 @@ impl MossSessions {
         request: MossRequestRows,
         sampling_mode: MossSamplingMode,
     ) -> Result<Vec<Vec<i64>>, MossTtsError> {
+        self.generate_audio_frames_with_callback(
+            assets,
+            request,
+            sampling_mode,
+            |_sessions, _frame| Ok(()),
+        )
+    }
+
+    fn generate_audio_frames_with_callback<F>(
+        &mut self,
+        assets: &MossAssets,
+        request: MossRequestRows,
+        sampling_mode: MossSamplingMode,
+        mut on_frame: F,
+    ) -> Result<Vec<Vec<i64>>, MossTtsError>
+    where
+        F: FnMut(&mut MossSessions, &[i64]) -> Result<(), MossTtsError>,
+    {
         let row_width = assets.row_width();
         let input_ids = Array3::from_shape_vec(
             (1, request.rows.len(), row_width),
@@ -334,6 +393,7 @@ impl MossSessions {
             global_hidden = take_last_hidden_output(&mut decode_outputs, "global_hidden", "tts_decode_step")?;
             decode_past = take_decode_present_outputs(&mut decode_outputs, assets, "tts_decode_step")?;
             drop(decode_outputs);
+            on_frame(self, &frame)?;
             frames.push(frame);
         }
 

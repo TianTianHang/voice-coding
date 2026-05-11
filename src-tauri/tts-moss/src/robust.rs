@@ -249,7 +249,12 @@ fn trim_token_edges(token: &str) -> (&str, &str, &str) {
     let end = token
         .char_indices()
         .rev()
-        .find(|(_, ch)| !matches!(ch, '"' | '\'' | ')' | ']' | '}' | '>' | ',' | ';' | ':' | '!' | '?'))
+        .find(|(_, ch)| {
+            !matches!(
+                ch,
+                '"' | '\'' | ')' | ']' | '}' | '>' | ',' | ';' | ':' | '!' | '?'
+            )
+        })
         .map(|(index, ch)| index + ch.len_utf8())
         .unwrap_or(start);
     (&token[..start], &token[start..end], &token[end..])
@@ -285,7 +290,10 @@ fn is_mention_or_hashtag(core: &str) -> bool {
 }
 
 fn is_dot_version(core: &str) -> bool {
-    let version = core.strip_prefix('v').or_else(|| core.strip_prefix('V')).unwrap_or(core);
+    let version = core
+        .strip_prefix('v')
+        .or_else(|| core.strip_prefix('V'))
+        .unwrap_or(core);
     let mut parts = version.split('.');
     let Some(first) = parts.next() else {
         return false;
@@ -303,8 +311,7 @@ fn is_file_like(core: &str) -> bool {
     let has_extension = core
         .rsplit_once('.')
         .map(|(_, ext)| {
-            (1..=8).contains(&ext.len())
-                && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
+            (1..=8).contains(&ext.len()) && ext.chars().all(|ch| ch.is_ascii_alphanumeric())
         })
         .unwrap_or(false);
     has_separator || has_extension
@@ -347,7 +354,10 @@ fn normalize_symbols(text: &str) -> String {
 
         match ch {
             '-' | '\u{2013}' | '\u{2014}' | '\u{2015}' => {
-                while matches!(chars.peek(), Some('-' | '\u{2013}' | '\u{2014}' | '\u{2015}' | '>')) {
+                while matches!(
+                    chars.peek(),
+                    Some('-' | '\u{2013}' | '\u{2014}' | '\u{2015}' | '>')
+                ) {
                     chars.next();
                 }
                 output.push('。');
@@ -444,7 +454,10 @@ fn collapse_spacing_and_punctuation(text: &str) -> String {
 }
 
 fn is_collapsible_punctuation(ch: char) -> bool {
-    matches!(ch, '.' | '!' | '?' | ',' | ';' | ':' | '。' | '，' | '；' | '：')
+    matches!(
+        ch,
+        '.' | '!' | '?' | ',' | ';' | ':' | '。' | '，' | '；' | '：'
+    )
 }
 
 fn stable_punctuation(ch: char) -> char {

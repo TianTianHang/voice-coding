@@ -53,6 +53,46 @@ source .venv/bin/activate  # or: .venv/bin/python
 python scripts/verify_onnx_inputs.py
 ```
 
+## OpenSpec Workflow
+
+This repository uses OpenSpec for non-trivial product or architecture changes. Agents should treat OpenSpec as the default planning and execution loop whenever a request affects behavior, public contracts, multi-file implementation, or architecture.
+
+### Workflow Modes
+- **Explore**: Use the `openspec-explore` skill when the user wants to discuss, compare options, investigate feasibility, or clarify requirements without implementing yet. Explore mode may read code and OpenSpec artifacts, but must not edit implementation files.
+- **Propose**: Use the `openspec-propose` skill when a new change needs a formal proposal. Create a change under `openspec/changes/<change-name>/` with `proposal.md`, `design.md`, `specs/**/*.md`, and `tasks.md` as required by the schema.
+- **Apply**: Use the `openspec-apply-change` skill when the user asks to implement an active change, continue work on a change, or when an approved proposal has complete artifacts and no further product decisions are needed.
+- **Archive**: Use the `openspec-archive-change` skill when implementation is complete, required checks have passed or documented blockers are accepted, and the specs should be promoted into `openspec/specs/`.
+
+### Autonomous Rotation
+Agents may rotate through OpenSpec phases without asking for confirmation when the user's intent is clear and the next phase is mechanically implied:
+- If the user asks for a proposal or design, create or update the OpenSpec change and run `openspec validate <change> --strict`.
+- If the user asks to implement an active change and `tasks.md` is complete, proceed through the tasks in order, updating checkboxes as work completes.
+- If a task reveals missing or incorrect requirements, pause implementation only long enough to update the relevant OpenSpec artifact, validate, then continue.
+- If all tasks are complete and validation/checks pass, offer to archive; archive directly only when the user has asked for autonomous completion or explicitly requested archiving.
+
+Do not create a new OpenSpec change for small, local bug fixes or mechanical edits unless the user requests it or the change modifies documented behavior.
+
+### Required Commands
+```bash
+openspec list --json
+openspec status --change <change-name> --json
+openspec validate <change-name> --strict
+```
+
+During apply work, also run the checks listed in that change's `tasks.md`. For Rust commands, prefer the Nix shell form from this file, for example:
+```bash
+nix develop -c cargo test -p <crate>
+nix develop -c cargo clippy -p <crate> --all-targets
+```
+
+### Artifact Rules
+- Keep OpenSpec artifacts in Simplified Chinese unless an existing artifact uses another language.
+- Specs define **what** the system must do; design explains **how**; tasks track implementation and verification.
+- Delta specs must use `## ADDED Requirements`, `## MODIFIED Requirements`, `## REMOVED Requirements`, or `## RENAMED Requirements`.
+- Every requirement needs at least one `#### Scenario:` with clear `WHEN` / `THEN` statements.
+- For `MODIFIED Requirements`, copy the full existing requirement block and edit it; do not provide a partial delta.
+- Keep `tasks.md` checkboxes in `- [ ]` / `- [x]` format so apply automation can track progress.
+
 ## Code Style Guidelines
 
 ### TypeScript/React (src/)

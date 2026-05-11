@@ -139,6 +139,29 @@ impl TtsEngine for MossOnnxTtsEngine {
         Ok(result)
     }
 
+    async fn synthesize_stream(
+        &self,
+        text: &str,
+        config: TtsConfig,
+    ) -> tts_core::Result<Vec<TtsSynthesisEvent>> {
+        let mut session = self.start_stream(config).await?;
+        session
+            .push_text(StreamingTextChunk::final_chunk(text))
+            .await?;
+        let result = session.finish().await?;
+        let mut events = Vec::new();
+        while let Some(event) = session.next_event().await? {
+            events.push(event);
+        }
+        if !events
+            .iter()
+            .any(|event| matches!(event, TtsSynthesisEvent::End(_)))
+        {
+            events.push(TtsSynthesisEvent::End(result));
+        }
+        Ok(events)
+    }
+
     async fn health_check(&self) -> tts_core::Result<bool> {
         let assets = self.assets.clone();
         let sessions = Arc::clone(&self.sessions);
