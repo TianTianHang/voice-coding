@@ -1,29 +1,40 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { useBackendVAD, type VADState } from "../hooks/useBackendVAD";
-import {
-  asrStatusLabel,
-  useAsrStatus,
-  type ModelPathSnapshot,
-} from "../hooks/useAsrStatus";
 import {
   useAgentEvents,
-  type AgentConnectionState,
   type AgentEvent,
 } from "../hooks/useAgentEvents";
-import { useBusinessApi, type SpeechOutputStatus } from "../hooks/useBusinessApi";
+import {
+  useBusinessApi,
+  type AgentStatus,
+  type AgentTurnStatus,
+  type AppReadiness,
+  type RuntimeErrorEvent,
+  type SpeechOutputStatus,
+  type VoiceSessionStatus,
+} from "../hooks/useBusinessApi";
 import { AgentEventStream } from "./AgentEventStream";
-import { AudioVisualizer } from "./AudioVisualizer";
+import { AudioVisualizer, type AudioVisualizerState } from "./AudioVisualizer";
 
 export type TtsStatusSnapshot = {
   state: "idle" | "synthesizing" | "ready" | "playing" | "failed";
   engineName: string;
-  model: ModelPathSnapshot;
+  model: TtsModelSnapshot;
   error?: string;
   hasBufferedAudio: boolean;
+};
+
+type TtsModelSnapshot = {
+  kind: string;
+  modelId: string;
+  engineName: string;
+  packageDir: string;
+  modelDir: string;
+  source: string;
+  legacyLayout: boolean;
+  missingFiles: string[];
 };
 
 export type AutoTtsStatusSnapshot = {
@@ -71,10 +82,12 @@ type SettingsSection =
   | "about";
 
 type ExperienceInput = {
-  vadState: VADState;
+  voice: VoiceSessionStatus;
   wakeDetected: boolean;
-  speechError?: string | null;
-  agentConnectionState: AgentConnectionState;
+  agent: AgentStatus;
+  agentTurn?: AgentTurnStatus | null;
+  speech: SpeechOutputStatus;
+  runtimeError?: RuntimeErrorEvent | null;
   latestAgentEvent?: AgentEvent;
 };
 
@@ -121,15 +134,19 @@ const experienceCopy: Record<
 };
 
 export function deriveVoiceExperienceState({
-  vadState,
+  voice,
   wakeDetected,
-  speechError,
-  agentConnectionState,
+  agent,
+  agentTurn,
+  speech,
+  runtimeError,
   latestAgentEvent,
 }: ExperienceInput): VoiceExperienceState {
   if (
-    speechError ||
-    agentConnectionState === "error" ||
+    voice.state === "failed" ||
+    speech.state === "failed" ||
+    runtimeError ||
+    agent.error ||
     latestAgentEvent?.kind === "error"
   ) {
     return "Error";
@@ -144,7 +161,11 @@ export function deriveVoiceExperienceState({
   }
 
   if (
-    vadState === "processing" ||
+    voice.state === "transcribing" ||
+    voice.state === "stopping" ||
+    agentTurn?.state === "running" ||
+    speech.state === "synthesizing" ||
+    speech.state === "ready" ||
     latestAgentEvent?.kind === "thinking" ||
     latestAgentEvent?.kind === "tool" ||
     latestAgentEvent?.kind === "status"
@@ -152,7 +173,12 @@ export function deriveVoiceExperienceState({
     return "Processing";
   }
 
-  if (vadState === "listening" || vadState === "recording") {
+  if (
+    voice.state === "starting" ||
+    voice.state === "listening" ||
+    voice.state === "recording" ||
+    voice.state === "paused"
+  ) {
     return "Listening";
   }
 
@@ -198,7 +224,7 @@ export function autoTtsStatusLabel(status?: AutoTtsStatusSnapshot | null): strin
   return "自动播报已开启";
 }
 
-function emptyTtsModelSnapshot(): ModelPathSnapshot {
+function emptyTtsModelSnapshot(): TtsModelSnapshot {
   return {
     kind: "tts",
     modelId: "",
@@ -272,6 +298,122 @@ function autoTtsStatusFromBusiness(
   };
 }
 
+type AsrStatusView = {
+  state: "initializing" | "ready" | "degraded" | "failed";
+  label: string;
+  engineName: string;
+  modelDir: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function stringField(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
+function asrStatusFromBusiness(
+  readiness?: AppReadiness,
+  asr?: unknown,
+): AsrStatusView {
+  const record = isRecord(asr) ? asr : {};
+  const state = stringField(record.state, readiness ?? "initializing");
+  const model = isRecord(record.model) ? record.model : {};
+  const error = stringField(record.error);
+  const normalized =
+    state === "ready" || state === "degraded" || state === "failed"
+      ? state
+      : readiness === "ready"
+        ? "ready"
+        : readiness === "degraded"
+          ? "degraded"
+          : readiness === "failed"
+            ? "failed"
+            : "initializing";
+
+  return {
+    state: normalized,
+    label:
+      normalized === "failed"
+        ? error || "语音模型不可用"
+        : normalized === "ready"
+          ? "语音模型已就绪"
+          : normalized === "degraded"
+            ? "语音模型部分可用"
+            : "语音模型准备中",
+    engineName: stringField(record.engineName),
+    modelDir: stringField(record.modelDir) || stringField(model.modelDir),
+  };
+}
+
+export function voiceSessionToVisualizerState(
+  voice: VoiceSessionStatus,
+): AudioVisualizerState {
+  switch (voice.state) {
+    case "listening":
+    case "paused":
+    case "starting":
+      return "listening";
+    case "recording":
+      return "recording";
+    case "transcribing":
+    case "stopping":
+      return "processing";
+    case "failed":
+    case "idle":
+      return "idle";
+  }
+}
+
+function voiceActionLabel(voice: VoiceSessionStatus): string {
+  switch (voice.state) {
+    case "idle":
+    case "failed":
+      return "点击开始";
+    case "starting":
+      return "启动中";
+    case "paused":
+      return "继续监听";
+    case "transcribing":
+    case "stopping":
+      return "处理中";
+    case "listening":
+    case "recording":
+      return "点击停止";
+  }
+}
+
+function canToggleVoiceSession(voice: VoiceSessionStatus): boolean {
+  return !["starting", "transcribing", "stopping"].includes(voice.state);
+}
+
+function businessAgentConnectionLabel(agent?: AgentStatus): string {
+  if (!agent) {
+    return "Agent 状态读取中";
+  }
+  if (agent.connected) {
+    return agent.profileName ? `Agent 已连接：${agent.profileName}` : "Agent 已连接";
+  }
+  return agent.error ? `Agent 连接异常：${agent.error}` : "Agent 未连接";
+}
+
+function agentTurnLabel(turn?: AgentTurnStatus | null): string {
+  if (!turn) {
+    return "无活跃回合";
+  }
+  switch (turn.state) {
+    case "running":
+      return "Agent 回合运行中";
+    case "completed":
+      return "Agent 回合已完成";
+    case "failed":
+      return turn.error ? `Agent 回合失败：${turn.error}` : "Agent 回合失败";
+    case "cancelled":
+      return "Agent 回合已取消";
+  }
+}
+
 export function AssistantConsole() {
   const [closeBehavior, setCloseBehaviorState] = useState<"hide" | "exit">(
     "hide",
@@ -282,17 +424,24 @@ export function AssistantConsole() {
   const [draftTranscript, setDraftTranscript] = useState("");
   const [autoTtsStatus, setAutoTtsStatus] = useState<AutoTtsStatusSnapshot | null>(null);
   const [debugWindowMessage, setDebugWindowMessage] = useState<string | null>(null);
-  const {
-    state,
-    transcript,
-    error,
-    recordingDuration,
-    startListening,
-    stopListening,
-  } = useBackendVAD();
-  const { status: asrStatus, error: asrStatusError } = useAsrStatus();
   const agent = useAgentEvents();
   const business = useBusinessApi();
+  const businessStatus = business.status;
+  const voice = businessStatus?.voice;
+  const speech = businessStatus?.speech;
+  const agentStatus = businessStatus?.agent;
+  const asrStatus = asrStatusFromBusiness(
+    businessStatus?.readiness,
+    businessStatus?.asr,
+  );
+  const visualizerState = voice
+    ? voiceSessionToVisualizerState(voice)
+    : "idle";
+  const recordingDuration = 0;
+  const transcript =
+    business.latestUtterance?.kind === "discarded"
+      ? ""
+      : business.latestUtterance?.transcript || "";
   const latestAgentEvent =
     agent.events.length > 0 ? agent.events[agent.events.length - 1] : undefined;
 
@@ -307,32 +456,15 @@ export function AssistantConsole() {
     setAutoTtsStatus((current) => ({ ...current, ...status }));
   }, [business.status?.speech, business.status?.tts]);
 
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-
-    async function setupAutoTtsEvents() {
-      unlisten = await listen<AutoTtsStatusSnapshot>("auto-tts-state", (event) => {
-        setAutoTtsStatus(event.payload);
-      });
-    }
-
-    void setupAutoTtsEvents();
-
-    return () => {
-      if (unlisten) {
-        unlisten();
-      }
-    };
-  }, []);
-
-  const speechError = error
-    ? error.includes("denied") || error.includes("NotAllowedError")
-      ? `${error} Please grant microphone permission in system settings.`
-      : error
-    : asrStatusError;
+  const speechError =
+    voice?.error ||
+    speech?.error ||
+    business.latestError?.message ||
+    businessStatus?.error ||
+    null;
 
   useEffect(() => {
-    if (state !== "recording") {
+    if (voice?.state !== "recording") {
       return;
     }
 
@@ -341,17 +473,27 @@ export function AssistantConsole() {
       setWakeDetected(false);
     }, 900);
     return () => window.clearTimeout(timeout);
-  }, [state]);
+  }, [voice?.state]);
 
   useEffect(() => {
     setDraftTranscript(transcript || "");
   }, [transcript]);
 
   const experienceState = deriveVoiceExperienceState({
-    vadState: state,
+    voice:
+      voice ?? {
+        state: "idle",
+        config: { inputMode: "autoSendToAgent" },
+      },
     wakeDetected,
-    speechError,
-    agentConnectionState: agent.connectionState,
+    agent: agentStatus ?? { connected: false },
+    agentTurn: business.currentTurn,
+    speech:
+      speech ?? {
+        state: "idle",
+        autoSpeakAgentResults: false,
+      },
+    runtimeError: business.latestError,
     latestAgentEvent,
   });
   const copy = experienceCopy[experienceState];
@@ -378,6 +520,93 @@ export function AssistantConsole() {
       response: responseEvent?.content || "",
     };
   }, [agent.events, copy.intent, copy.status, speechError, transcript]);
+
+  async function toggleVoiceSession() {
+    if (!voice || !canToggleVoiceSession(voice)) {
+      return;
+    }
+
+    try {
+      if (business.status?.readiness !== "ready") {
+        await business.prepare();
+      }
+      if (voice.state === "paused") {
+        await business.resumeVoiceSession();
+      } else if (voice.state === "idle" || voice.state === "failed") {
+        await business.startVoiceSession();
+      } else {
+        await business.stopVoiceSession();
+      }
+    } catch (error) {
+      setDebugWindowMessage(String(error));
+    }
+  }
+
+  async function submitDraftTranscript() {
+    const text = draftTranscript.trim();
+    const utteranceId = business.latestUtterance?.utteranceId;
+    try {
+      if (utteranceId) {
+        await business.editAndSubmitTranscript({ utteranceId, text });
+      } else if (text) {
+        await business.sendAgentMessage({ text, source: "manual" });
+      }
+      setActiveView("main");
+    } catch (error) {
+      setDebugWindowMessage(String(error));
+    }
+  }
+
+  async function discardDraftTranscript() {
+    const utteranceId = business.latestUtterance?.utteranceId;
+    try {
+      if (utteranceId) {
+        await business.discardTranscript(utteranceId);
+      }
+      setDraftTranscript("");
+      setActiveView("main");
+    } catch (error) {
+      setDebugWindowMessage(String(error));
+    }
+  }
+
+  async function toggleAutoSpeak() {
+    const current = Boolean(business.status?.speech.autoSpeakAgentResults);
+    try {
+      await business.setSpeechPreferences({
+        autoSpeakAgentResults: !current,
+      });
+    } catch (error) {
+      setDebugWindowMessage(String(error));
+    }
+  }
+
+  async function speakCurrentResponse() {
+    const content = feedback.response.trim();
+    if (!content) {
+      return;
+    }
+    try {
+      await business.speakAgentResult({
+        content,
+        resultId: responseEvent?.id,
+      });
+    } catch (error) {
+      setDebugWindowMessage(String(error));
+    }
+  }
+
+  async function cancelCurrentTurn() {
+    const turnId = business.currentTurn?.turnId;
+    if (!turnId || business.currentTurn?.state !== "running") {
+      return;
+    }
+    try {
+      await business.cancelAgentTurn(turnId);
+    } catch (error) {
+      setDebugWindowMessage(String(error));
+    }
+  }
 
   async function setCloseBehavior(behavior: "hide" | "exit") {
     setCloseBehaviorState(behavior);
@@ -462,16 +691,16 @@ export function AssistantConsole() {
             <StatusDetailPage
               copy={copy}
               experienceState={experienceState}
-              state={state}
+              state={visualizerState}
               recordingDuration={recordingDuration}
               asrStatus={asrStatus}
-              asrStatusError={asrStatusError}
-              agentConnectionLabel={agent.connectionLabel}
-              agentConnectionState={agent.connectionState}
+              agentConnectionLabel={businessAgentConnectionLabel(agentStatus)}
+              agentTurnLabel={agentTurnLabel(business.currentTurn)}
               autoTtsStatus={autoTtsStatus}
               speechError={speechError}
-              onStart={startListening}
-              onStop={stopListening}
+              voiceActionLabel={voice ? voiceActionLabel(voice) : "点击开始"}
+              voiceActionDisabled={voice ? !canToggleVoiceSession(voice) : true}
+              onToggleVoice={toggleVoiceSession}
             />
           )}
 
@@ -482,6 +711,8 @@ export function AssistantConsole() {
               intent={feedback.intent}
               status={feedback.status}
               onChange={setDraftTranscript}
+              onCancel={discardDraftTranscript}
+              onSubmit={submitDraftTranscript}
             />
           )}
 
@@ -491,6 +722,8 @@ export function AssistantConsole() {
               event={responseEvent}
               plan={agent.plan}
               onOpenEvents={() => setActiveView("events")}
+              onSpeak={speakCurrentResponse}
+              onStopSpeech={business.stopSpeech}
             />
           )}
 
@@ -512,6 +745,7 @@ export function AssistantConsole() {
               onCloseBehaviorChange={setCloseBehavior}
               onSectionChange={setSettingsSection}
               onOpenDebugTools={openDebugToolsWindow}
+              onToggleAutoSpeak={toggleAutoSpeak}
             />
           )}
 
@@ -569,14 +803,14 @@ export function AssistantConsole() {
                 </h2>
                 <p className="mt-2 text-base font-bold text-slate-200">{copy.detail}</p>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-                  <AudioVisualizer state={state} recordingDuration={recordingDuration} />
+                  <AudioVisualizer state={visualizerState} recordingDuration={recordingDuration} />
                   <button
                     className="min-h-9 cursor-pointer rounded-md px-2 text-sm font-extrabold text-emerald-300 transition-colors duration-200 hover:bg-emerald-400/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 disabled:cursor-not-allowed disabled:text-slate-500"
-                    onClick={state === "idle" ? startListening : stopListening}
-                    disabled={state === "processing"}
+                    onClick={toggleVoiceSession}
+                    disabled={!voice || !canToggleVoiceSession(voice)}
                     type="button"
                   >
-                    {state === "idle" ? "点击开始" : state === "processing" ? "处理中" : "点击停止"}
+                    {voice ? voiceActionLabel(voice) : "加载中"}
                   </button>
                 </div>
               </div>
@@ -591,11 +825,11 @@ export function AssistantConsole() {
               <div className="flex shrink-0 items-center gap-1">
                 <button
                   className="min-h-7 cursor-pointer rounded-full border border-emerald-300/25 px-2.5 text-[11px] font-extrabold text-emerald-300 transition-colors duration-200 hover:bg-emerald-400/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 disabled:cursor-not-allowed disabled:opacity-60"
-                  onClick={agent.connectionState === "connected" ? agent.disconnect : agent.connect}
-                  disabled={agent.connectionState === "connecting"}
+                  onClick={cancelCurrentTurn}
+                  disabled={business.currentTurn?.state !== "running"}
                   type="button"
                 >
-                  {agent.connectionState === "connected" ? "断开" : "连接"}
+                  {business.currentTurn?.state === "running" ? "取消回合" : "回合空闲"}
                 </button>
                 <button
                   className="grid h-8 w-8 cursor-pointer place-items-center rounded-md text-slate-400 transition-colors duration-200 hover:bg-white/8 hover:text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100"
@@ -622,6 +856,14 @@ export function AssistantConsole() {
                 <ThumbGlyph />
                 <ThumbDownGlyph />
               </div>
+              <button
+                className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-xs font-extrabold text-sky-300 transition-colors duration-200 hover:bg-sky-400/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
+                onClick={speakCurrentResponse}
+                type="button"
+              >
+                播报回复
+                <SparkGlyph />
+              </button>
               <button
                 className="inline-flex min-h-8 cursor-pointer items-center gap-1.5 rounded-md px-1.5 text-xs font-extrabold text-sky-300 transition-colors duration-200 hover:bg-sky-400/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-300"
                 onClick={() => setActiveView("response")}
@@ -666,8 +908,9 @@ export function AssistantConsole() {
         />
 
         <section className="session-strip text-sm" aria-label="Agent session">
-          <FooterStatus value={asrStatus.state === "failed" ? asrStatusLabel(asrStatus) : "语音模型已就绪"} />
-          <FooterStatus value={agent.connectionState === "connected" ? "Agent 已连接" : agent.connectionLabel} />
+          <FooterStatus value={asrStatus.label} />
+          <FooterStatus value={businessAgentConnectionLabel(agentStatus)} />
+          <FooterStatus value={agentTurnLabel(business.currentTurn)} />
           <FooterStatus value={autoTtsStatus?.enabled ? "自动播报已开启" : "自动播报未开启"} />
         </section>
         {debugWindowMessage && (
@@ -863,31 +1106,32 @@ function StatusDetailPage({
   state,
   recordingDuration,
   asrStatus,
-  asrStatusError,
   agentConnectionLabel,
-  agentConnectionState,
+  agentTurnLabel,
   autoTtsStatus,
   speechError,
-  onStart,
-  onStop,
+  voiceActionLabel,
+  voiceActionDisabled,
+  onToggleVoice,
 }: {
   copy: { headline: string; detail: string; status: string; intent: string };
   experienceState: VoiceExperienceState;
-  state: VADState;
+  state: AudioVisualizerState;
   recordingDuration: number;
-  asrStatus: ReturnType<typeof useAsrStatus>["status"];
-  asrStatusError: string | null;
+  asrStatus: AsrStatusView;
   agentConnectionLabel: string;
-  agentConnectionState: AgentConnectionState;
+  agentTurnLabel: string;
   autoTtsStatus?: AutoTtsStatusSnapshot | null;
   speechError?: string | null;
-  onStart: () => void;
-  onStop: () => void;
+  voiceActionLabel: string;
+  voiceActionDisabled: boolean;
+  onToggleVoice: () => void;
 }) {
   const details = [
     { label: "语音状态", value: copy.status },
-    { label: "识别模型", value: asrStatusLabel(asrStatus) },
+    { label: "识别模型", value: asrStatus.label },
     { label: "Agent", value: agentConnectionLabel },
+    { label: "Agent 回合", value: agentTurnLabel },
     { label: "自动播报", value: autoTtsStatusLabel(autoTtsStatus) },
   ];
 
@@ -913,11 +1157,11 @@ function StatusDetailPage({
               <AudioVisualizer state={state} recordingDuration={recordingDuration} />
               <button
                 className="min-h-9 cursor-pointer rounded-md bg-emerald-500 px-3 text-sm font-black text-slate-950 transition-colors duration-200 hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
-                onClick={state === "idle" ? onStart : onStop}
-                disabled={state === "processing"}
+                onClick={onToggleVoice}
+                disabled={voiceActionDisabled}
                 type="button"
               >
-                {state === "idle" ? "开始监听" : state === "processing" ? "处理中" : "停止监听"}
+                {voiceActionLabel}
               </button>
             </div>
           </div>
@@ -925,19 +1169,15 @@ function StatusDetailPage({
       </div>
       <div className="secondary-panel">
         <SectionTitle icon={<InfoGlyph />} title="状态说明" />
-        {(speechError || asrStatusError) && (
+        {speechError && (
           <p className="mt-3 text-sm font-semibold leading-6 text-rose-300">
-            {speechError || asrStatusError}
+            {speechError}
           </p>
         )}
         <div className="mt-4 grid gap-2">
           {details.map((item) => (
             <KeyValueRow key={item.label} label={item.label} value={item.value} />
           ))}
-          <KeyValueRow
-            label="连接态"
-            value={agentConnectionState === "connected" ? "已连接" : agentConnectionLabel}
-          />
         </div>
       </div>
       <div className="secondary-panel">
@@ -958,12 +1198,16 @@ function TranscriptDetailPage({
   intent,
   status,
   onChange,
+  onCancel,
+  onSubmit,
 }: {
   value: string;
   savedValue: string;
   intent: string;
   status: string;
   onChange: (value: string) => void;
+  onCancel: () => void;
+  onSubmit: () => void;
 }) {
   return (
     <section className="secondary-grid" aria-label="Transcript editor">
@@ -976,10 +1220,19 @@ function TranscriptDetailPage({
           placeholder=""
         />
         <div className="mt-4 grid grid-cols-2 gap-2 max-sm:grid-cols-1">
-          <button className="min-h-10 cursor-pointer rounded-md border border-white/10 px-3 text-sm font-black text-slate-300 transition-colors duration-200 hover:bg-white/8 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100" type="button">
+          <button
+            className="min-h-10 cursor-pointer rounded-md border border-white/10 px-3 text-sm font-black text-slate-300 transition-colors duration-200 hover:bg-white/8 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100"
+            onClick={onCancel}
+            type="button"
+          >
             取消
           </button>
-          <button className="min-h-10 cursor-pointer rounded-md bg-emerald-500 px-3 text-sm font-black text-slate-950 transition-colors duration-200 hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300" type="button">
+          <button
+            className="min-h-10 cursor-pointer rounded-md bg-emerald-500 px-3 text-sm font-black text-slate-950 transition-colors duration-200 hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300 disabled:cursor-not-allowed disabled:bg-slate-600 disabled:text-slate-300"
+            disabled={!value.trim()}
+            onClick={onSubmit}
+            type="button"
+          >
             保存并确认
           </button>
         </div>
@@ -1001,11 +1254,15 @@ function ResponseDetailPage({
   event,
   plan,
   onOpenEvents,
+  onSpeak,
+  onStopSpeech,
 }: {
   response: string;
   event?: AgentEvent;
   plan?: { entries: { content: string; priority: string; status: string }[] };
   onOpenEvents: () => void;
+  onSpeak: () => void;
+  onStopSpeech: () => void;
 }) {
   const files = event?.tool?.locations ?? [];
 
@@ -1021,6 +1278,20 @@ function ResponseDetailPage({
             <ThumbGlyph />
             <ThumbDownGlyph />
           </div>
+          <button
+            className="min-h-9 cursor-pointer rounded-md border border-white/10 px-3 text-sm font-black text-slate-300 transition-colors duration-200 hover:bg-white/8 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100"
+            onClick={onSpeak}
+            type="button"
+          >
+            播报回复
+          </button>
+          <button
+            className="min-h-9 cursor-pointer rounded-md border border-white/10 px-3 text-sm font-black text-slate-300 transition-colors duration-200 hover:bg-white/8 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100"
+            onClick={onStopSpeech}
+            type="button"
+          >
+            停止播报
+          </button>
           <button
             className="min-h-9 cursor-pointer rounded-md border border-white/10 px-3 text-sm font-black text-slate-300 transition-colors duration-200 hover:bg-white/8 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100"
             onClick={onOpenEvents}
@@ -1130,14 +1401,16 @@ function SettingsPage({
   onCloseBehaviorChange,
   onSectionChange,
   onOpenDebugTools,
+  onToggleAutoSpeak,
 }: {
   activeSection: SettingsSection;
-  asrStatus: ReturnType<typeof useAsrStatus>["status"];
+  asrStatus: AsrStatusView;
   autoTtsStatus?: AutoTtsStatusSnapshot | null;
   closeBehavior: "hide" | "exit";
   onCloseBehaviorChange: (behavior: "hide" | "exit") => void;
   onSectionChange: (section: SettingsSection) => void;
   onOpenDebugTools: () => void;
+  onToggleAutoSpeak: () => void;
 }) {
   const sections: { id: SettingsSection; label: string }[] = [
     { id: "general", label: "通用" },
@@ -1183,9 +1456,7 @@ function SettingsPage({
         {activeSection === "speech" && (
           <SettingsSectionPanel title="语音设置">
             <KeyValueRow label="ASR 引擎" value={asrStatus.engineName} />
-            {(asrStatus.modelDir || asrStatus.model.modelDir) && (
-              <KeyValueRow label="模型目录" value={asrStatus.modelDir || asrStatus.model.modelDir} />
-            )}
+            {asrStatus.modelDir && <KeyValueRow label="模型目录" value={asrStatus.modelDir} />}
             <SettingToggle label="静音检测" checked />
             <SettingToggle label="自动提交识别文本" checked />
           </SettingsSectionPanel>
@@ -1194,7 +1465,11 @@ function SettingsPage({
           <SettingsSectionPanel title="播报设置">
             {autoTtsStatus?.tts.engineName && <KeyValueRow label="TTS 引擎" value={autoTtsStatus.tts.engineName} />}
             <KeyValueRow label="当前状态" value={autoTtsStatusLabel(autoTtsStatus)} />
-            <SettingToggle label="自动播报 Agent 回复" checked={Boolean(autoTtsStatus?.enabled)} />
+            <SettingToggle
+              label="自动播报 Agent 回复"
+              checked={Boolean(autoTtsStatus?.enabled)}
+              onChange={onToggleAutoSpeak}
+            />
             <SettingToggle label="跳过重复回复" checked />
           </SettingsSectionPanel>
         )}
@@ -1258,11 +1533,25 @@ function KeyValueRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function SettingToggle({ label, checked }: { label: string; checked: boolean }) {
+function SettingToggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange?: () => void;
+}) {
   return (
     <label className="flex min-h-11 cursor-pointer items-center justify-between gap-3 rounded-md border border-white/10 bg-white/[0.03] px-3">
       <span className="text-sm font-bold text-slate-200">{label}</span>
-      <input className="sr-only" type="checkbox" defaultChecked={checked} />
+      <input
+        checked={checked}
+        className="sr-only"
+        onChange={onChange}
+        readOnly={!onChange}
+        type="checkbox"
+      />
       <span className={`relative h-6 w-10 rounded-full ${checked ? "bg-emerald-500" : "bg-slate-700"}`} aria-hidden="true">
         <span className={`absolute top-1 h-4 w-4 rounded-full bg-white transition-transform duration-200 ${checked ? "left-5" : "left-1"}`} />
       </span>

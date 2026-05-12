@@ -20,19 +20,21 @@ describe("deriveVoiceExperienceState", () => {
   it("uses WakeDetected as a short activation confirmation", () => {
     expect(
       deriveVoiceExperienceState({
-        vadState: "recording",
+        voice: { state: "recording", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: true,
-        agentConnectionState: "connected",
+        agent: { connected: true },
+        speech: { state: "idle", autoSpeakAgentResults: true },
       }),
     ).toBe("WakeDetected");
   });
 
-  it("maps active VAD recording to Listening after the wake confirmation", () => {
+  it("maps active business voice sessions to Listening after wake confirmation", () => {
     expect(
       deriveVoiceExperienceState({
-        vadState: "recording",
+        voice: { state: "recording", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: false,
-        agentConnectionState: "connected",
+        agent: { connected: true },
+        speech: { state: "idle", autoSpeakAgentResults: true },
       }),
     ).toBe("Listening");
   });
@@ -40,17 +42,26 @@ describe("deriveVoiceExperienceState", () => {
   it("maps processing and agent work to Working before response", () => {
     expect(
       deriveVoiceExperienceState({
-        vadState: "processing",
+        voice: { state: "transcribing", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: false,
-        agentConnectionState: "connected",
+        agent: { connected: true },
+        speech: { state: "idle", autoSpeakAgentResults: true },
       }),
     ).toBe("Processing");
 
     expect(
       deriveVoiceExperienceState({
-        vadState: "listening",
+        voice: { state: "listening", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: false,
-        agentConnectionState: "connected",
+        agent: { connected: true },
+        agentTurn: {
+          turnId: "turn-1",
+          state: "running",
+          source: "voice",
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        speech: { state: "idle", autoSpeakAgentResults: true },
         latestAgentEvent: event({ kind: "tool", content: "Running tests" }),
       }),
     ).toBe("Processing");
@@ -59,9 +70,10 @@ describe("deriveVoiceExperienceState", () => {
   it("maps result events to Responding", () => {
     expect(
       deriveVoiceExperienceState({
-        vadState: "listening",
+        voice: { state: "listening", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: false,
-        agentConnectionState: "connected",
+        agent: { connected: true },
+        speech: { state: "idle", autoSpeakAgentResults: true },
         latestAgentEvent: event({ kind: "result", content: "Done" }),
       }),
     ).toBe("Responding");
@@ -70,18 +82,19 @@ describe("deriveVoiceExperienceState", () => {
   it("prioritizes recoverable errors over all other states", () => {
     expect(
       deriveVoiceExperienceState({
-        vadState: "recording",
+        voice: { state: "recording", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: true,
-        speechError: "Microphone denied",
-        agentConnectionState: "connected",
+        agent: { connected: true },
+        speech: { state: "failed", error: "Microphone denied", autoSpeakAgentResults: true },
       }),
     ).toBe("Error");
 
     expect(
       deriveVoiceExperienceState({
-        vadState: "idle",
+        voice: { state: "idle", config: { inputMode: "autoSendToAgent" } },
         wakeDetected: false,
-        agentConnectionState: "error",
+        agent: { connected: false, error: "Agent unavailable" },
+        speech: { state: "idle", autoSpeakAgentResults: true },
       }),
     ).toBe("Error");
   });

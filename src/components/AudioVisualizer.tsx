@@ -1,18 +1,22 @@
-import type { VADState } from "../hooks/useBackendVAD";
+export type AudioVisualizerState =
+  | "idle"
+  | "listening"
+  | "recording"
+  | "processing";
 
 interface AudioVisualizerProps {
-  state: VADState;
+  state: AudioVisualizerState;
   recordingDuration: number;
 }
 
-const stateConfig: Record<VADState, { label: string; color: string }> = {
+const stateConfig: Record<AudioVisualizerState, { label: string; color: string }> = {
   idle: { label: "Stopped", color: "#888" },
   listening: { label: "Listening", color: "#1f8a70" },
   recording: { label: "Recording", color: "#c23b45" },
   processing: { label: "Processing...", color: "#b06a00" },
 };
 
-export function getVadStatusLabel(state: VADState): string {
+export function getVadStatusLabel(state: AudioVisualizerState): string {
   return stateConfig[state].label;
 }
 

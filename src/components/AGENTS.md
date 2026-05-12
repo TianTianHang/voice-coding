@@ -3,7 +3,7 @@
 React UI components for the voice assistant console. Components here should stay mostly declarative and delegate backend/event state to hooks in `src/hooks/`.
 
 ## Module Map
-- `AssistantConsole.tsx` is the main experience shell: voice state, agent timeline, VAD threshold controls, close behavior, and TTS controls.
+- `AssistantConsole.tsx` is the main experience shell: business API voice state, transcript actions, Agent timeline, close behavior, and speech controls.
 - `AgentEventStream.tsx` renders ACP agent events, tool calls, confirmations, diffs, and session state updates.
 - `VoiceRecorder.tsx` is the focused recorder UI around backend VAD state.
 - `AudioVisualizer.tsx` renders visual feedback for listening/recording states.
@@ -11,9 +11,11 @@ React UI components for the voice assistant console. Components here should stay
 - `TranscriptDisplay.tsx` presents transcript text and errors.
 
 ## Key Relationships
-- `AssistantConsole` consumes `useBackendVAD`, `useAsrStatus`, and `useAgentEvents`.
+- `AssistantConsole` consumes `useBusinessApi` as the main product-flow facade for app readiness, voice sessions, transcript lifecycle, Agent connection/turn status, speech output, and runtime errors.
+- `AssistantConsole` may consume `useAgentEvents` only for ACP content-stream rendering: thinking, tool calls, result text, diffs, confirmations, plans, and confirmation responses.
+- Do not reintroduce `useBackendVAD`, `useAsrStatus`, direct debug transcription, or debug TTS status hooks into the main console flow; those belong to debug/compat views such as `DebugToolsWindow` or focused legacy components.
 - Agent confirmation buttons must call `respondToConfirmation` from `useAgentEvents`; do not call Tauri directly from deep rendering helpers unless the hook cannot own it.
-- VAD state names must match `src/hooks/useBackendVAD.ts` and backend `VadState` serialization.
+- Voice display state in the main console should be derived from business `VoiceSessionStatus`, not legacy VAD state names.
 
 ## Editing Notes
 - Preserve existing visual language in `App.css`; avoid introducing unrelated design systems.
