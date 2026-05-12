@@ -1,7 +1,8 @@
 use std::{path::Path, time::Instant};
 
 use tts_core::{
-    MossTtsConfig, PcmData, TtsConfig, TtsEngine, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ,
+    MossTtsConfig, PcmData, TtsConfig, TtsEngine, TtsStreamConfig, TtsSynthesisEvent,
+    PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ,
 };
 use tts_moss::MossOnnxTtsEngine;
 
@@ -27,6 +28,117 @@ fn write_wav(path: &Path, result: &tts_core::TtsResult) -> hound::Result<()> {
         }
     }
     writer.finalize()
+}
+
+#[tokio::test]
+#[ignore = "requires downloaded MOSS ONNX model assets and measures local realtime streaming performance"]
+async fn streaming_synthesis_is_realtime_on_this_machine() {
+    let model_dir = std::env::var("MOSS_TTS_MODEL_DIR")
+        .expect("set MOSS_TTS_MODEL_DIR to MOSS-TTS-Nano-100M-ONNX before running this test");
+    eprintln!("MOSS_TTS_MODEL_DIR={model_dir}");
+
+    let text = std::env::var("MOSS_TTS_PERF_TEXT")
+        .unwrap_or_else(|_| "你好，当前测试用于确认本机是否支持实时语音合成播放。".to_string());
+    let max_rtf = std::env::var("MOSS_TTS_REALTIME_MAX_RTF")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(1.0);
+    let chunk_ms = std::env::var("MOSS_TTS_PERF_CHUNK_MS")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(240);
+    let warmup_text =
+        std::env::var("MOSS_TTS_PERF_WARMUP_TEXT").unwrap_or_else(|_| "预热。".to_string());
+
+    let engine = MossOnnxTtsEngine::from_env().expect("MOSS engine should initialize");
+    assert!(engine
+        .health_check()
+        .await
+        .expect("health check should pass"));
+
+    let warmup_started = Instant::now();
+    let warmup_result = engine
+        .synthesize_stream_events(
+            &warmup_text,
+            perf_config(chunk_ms),
+            Box::new(|_| {}),
+        )
+        .await
+        .expect("MOSS warmup streaming synthesis should succeed");
+    warmup_result
+        .validate_for_playback()
+        .expect("warmup audio must satisfy playback contract");
+    eprintln!(
+        "streaming warmup: text_chars={} elapsed={:.3}s audio={:.3}s",
+        warmup_text.chars().count(),
+        warmup_started.elapsed().as_secs_f64(),
+        audio_duration_sec(&warmup_result)
+    );
+
+    let mut first_audio_elapsed = None;
+    let mut chunk_count = 0usize;
+    let started = Instant::now();
+    let result = engine
+        .synthesize_stream_events(
+            &text,
+            perf_config(chunk_ms),
+            Box::new(|event| {
+                if let TtsSynthesisEvent::AudioChunk(_) = event {
+                    chunk_count += 1;
+                    first_audio_elapsed.get_or_insert_with(|| started.elapsed());
+                }
+            }),
+        )
+        .await
+        .expect("MOSS streaming synthesis should succeed");
+    let elapsed = started.elapsed();
+
+    result
+        .validate_for_playback()
+        .expect("synthesized audio must satisfy playback contract");
+    assert!(
+        result.audio.pcm.len_frames(result.audio.channels) > 0,
+        "synthesized audio should contain PCM frames"
+    );
+    assert!(chunk_count > 0, "streaming synthesis should emit audio chunks");
+
+    let audio_duration_sec = audio_duration_sec(&result);
+    let elapsed_sec = elapsed.as_secs_f64();
+    let rtf = elapsed_sec / audio_duration_sec;
+    eprintln!(
+        "streaming realtime perf: text_chars={} chunk_ms={} chunks={} first_audio={:?} elapsed={:.3}s audio={:.3}s rtf={:.3} max_rtf={:.3}",
+        text.chars().count(),
+        chunk_ms,
+        chunk_count,
+        first_audio_elapsed,
+        elapsed_sec,
+        audio_duration_sec,
+        rtf,
+        max_rtf
+    );
+
+    assert!(
+        rtf <= max_rtf,
+        "streaming synthesis is not realtime: rtf={rtf:.3}, max_rtf={max_rtf:.3}"
+    );
+}
+
+fn perf_config(chunk_ms: u32) -> TtsConfig {
+    TtsConfig {
+        stream: Some(TtsStreamConfig {
+            audio_chunk_ms: Some(chunk_ms),
+            ..TtsStreamConfig::default()
+        }),
+        moss: Some(MossTtsConfig {
+            sampling_mode: Some("greedy".to_string()),
+            ..MossTtsConfig::default()
+        }),
+        ..TtsConfig::default()
+    }
+}
+
+fn audio_duration_sec(result: &tts_core::TtsResult) -> f64 {
+    result.audio.pcm.len_frames(result.audio.channels) as f64 / result.audio.sample_rate_hz as f64
 }
 
 #[tokio::test]

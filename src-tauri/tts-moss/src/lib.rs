@@ -133,6 +133,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_moss_tts_intra_threads() {
+        assert_eq!(parse_moss_tts_intra_threads("1"), Some(1));
+        assert_eq!(parse_moss_tts_intra_threads(" 4 "), Some(4));
+        assert_eq!(parse_moss_tts_intra_threads("0"), None);
+        assert_eq!(parse_moss_tts_intra_threads(""), None);
+        assert_eq!(parse_moss_tts_intra_threads("many"), None);
+    }
+
+    #[test]
     fn sampling_mode_defaults_to_fixed() {
         assert_eq!(
             MossSamplingMode::from_config(&TtsConfig::default()).unwrap(),
@@ -301,6 +310,8 @@ mod tests {
         assert_eq!(state.transformer_offsets[0].data, vec![0]);
         assert_eq!(state.attention_caches[0].keys.shape, vec![1, 4, 8, 64]);
         assert_eq!(state.attention_caches[0].keys.data.len(), 4 * 8 * 64);
+        assert_eq!(state.attention_caches[0].positions.shape, vec![1, 8]);
+        assert_eq!(state.attention_caches[0].positions.data, vec![-1; 8]);
         assert!(state.input_names().contains(&"transformer_offset_0"));
         assert!(state.output_names().contains(&"attn_cached_values_out_0"));
     }

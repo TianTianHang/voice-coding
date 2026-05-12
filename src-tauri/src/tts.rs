@@ -150,60 +150,6 @@ enum DebugTtsPlaybackState {
     Ended,
 }
 
-#[cfg(test)]
-mod debug_playback_buffer_tests {
-    use super::*;
-
-    fn buffer(ms: u64) -> crate::audio::PlaybackBuffer {
-        let samples =
-            PLAYBACK_SAMPLE_RATE_HZ as usize * PLAYBACK_CHANNELS as usize * ms as usize / 1_000;
-        crate::audio::PlaybackBuffer::from_samples(vec![0.0; samples])
-    }
-
-    #[test]
-    fn waits_for_initial_buffer_before_playing() {
-        let mut playback = DebugTtsPlaybackBuffer::new(PlaybackBufferConfig::default());
-        playback.push(buffer(300), 1);
-        playback.update_for_output(0.0);
-        assert_eq!(playback.state, DebugTtsPlaybackState::InitialBuffering);
-        assert!(!playback.should_flush_pending());
-
-        playback.push(buffer(300), 2);
-        playback.update_for_output(0.0);
-        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
-        assert!(playback.should_flush_pending());
-    }
-
-    #[test]
-    fn rebuffering_waits_for_target_then_resumes() {
-        let mut playback = DebugTtsPlaybackBuffer::new(PlaybackBufferConfig::default());
-        playback.push(buffer(600), 1);
-        playback.update_for_output(0.0);
-        while playback.pop_pending().is_some() {}
-
-        playback.update_for_output(0.100);
-        assert_eq!(playback.state, DebugTtsPlaybackState::Rebuffering);
-        playback.push(buffer(300), 2);
-        playback.update_for_output(0.100);
-        assert_eq!(playback.state, DebugTtsPlaybackState::Rebuffering);
-
-        playback.push(buffer(300), 3);
-        playback.update_for_output(0.100);
-        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
-    }
-
-    #[test]
-    fn final_chunk_drains_even_below_initial_buffer() {
-        let mut playback = DebugTtsPlaybackBuffer::new(PlaybackBufferConfig::default());
-        playback.push(buffer(120), 1);
-        playback.mark_finished();
-        playback.update_for_output(0.0);
-
-        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
-        assert!(playback.should_flush_pending());
-    }
-}
-
 impl DebugTtsPlaybackState {
     fn as_event_state(self) -> DebugTtsBufferState {
         match self {
@@ -216,6 +162,108 @@ impl DebugTtsPlaybackState {
     }
 }
 
+#[cfg(test)]
+mod debug_playback_buffer_tests {
+    use super::*;
+
+    fn buffer(ms: u64) -> crate::audio::PlaybackBuffer {
+        let samples =
+            PLAYBACK_SAMPLE_RATE_HZ as usize * PLAYBACK_CHANNELS as usize * ms as usize / 1_000;
+        crate::audio::PlaybackBuffer::from_samples(vec![0.0; samples])
+    }
+
+    #[test]
+    fn waits_for_adaptive_initial_buffer_before_playing() {
+        let mut playback = AdaptiveTtsJitterBuffer::new(PlaybackBufferConfig::default());
+        playback.push(buffer(300), 1);
+        playback.update_for_output(0.0);
+        assert_eq!(playback.state, DebugTtsPlaybackState::InitialBuffering);
+        assert!(!playback.should_flush_pending());
+
+        playback.push(buffer(300), 2);
+        playback.update_for_output(0.0);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
+        assert!(playback.should_flush_pending());
+    }
+
+    #[test]
+    fn stable_chunk_arrivals_do_not_raise_target() {
+        let mut playback = AdaptiveTtsJitterBuffer::new(PlaybackBufferConfig::default());
+        let start = Instant::now();
+        let initial_target = playback.dynamic_target_sec();
+        for sequence in 0..8 {
+            playback.push_at(
+                buffer(100),
+                sequence,
+                start + Duration::from_millis(sequence * 100),
+            );
+        }
+
+        assert!(playback.dynamic_target_sec() <= initial_target + 0.001);
+    }
+
+    #[test]
+    fn jittery_chunk_arrivals_raise_target_without_exceeding_cap() {
+        let mut playback = AdaptiveTtsJitterBuffer::new(PlaybackBufferConfig::default());
+        let start = Instant::now();
+        let initial_target = playback.dynamic_target_sec();
+        let offsets = [0, 80, 420, 500, 940, 1_020, 1_480, 1_560];
+        for (sequence, offset) in offsets.into_iter().enumerate() {
+            playback.push_at(
+                buffer(100),
+                sequence as u64,
+                start + Duration::from_millis(offset),
+            );
+        }
+
+        assert!(playback.dynamic_target_sec() > initial_target);
+        assert!(playback.dynamic_target_sec() <= 1.800);
+    }
+
+    #[test]
+    fn low_water_rebuffering_waits_for_dynamic_target_then_resumes() {
+        let mut playback = AdaptiveTtsJitterBuffer::new(PlaybackBufferConfig::default());
+        playback.push(buffer(600), 1);
+        playback.update_for_output(0.0);
+        while playback.pop_pending().is_some() {}
+
+        playback.update_for_output(0.100);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Rebuffering);
+        let target = playback.rebuffer_resume_target_sec();
+        playback.push(buffer(((target * 1_000.0) as u64).saturating_sub(100)), 2);
+        playback.update_for_output(0.100);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Rebuffering);
+
+        playback.push(buffer(160), 3);
+        playback.update_for_output(0.100);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
+    }
+
+    #[test]
+    fn final_chunk_drains_even_below_adaptive_target() {
+        let mut playback = AdaptiveTtsJitterBuffer::new(PlaybackBufferConfig::default());
+        playback.push(buffer(120), 1);
+        playback.mark_finished();
+        playback.update_for_output(0.0);
+
+        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
+        assert!(playback.should_flush_pending());
+    }
+
+    #[test]
+    fn stable_playback_lowers_target_but_not_below_floor() {
+        let mut playback = AdaptiveTtsJitterBuffer::new(PlaybackBufferConfig::default());
+        playback.increase_target(0.600);
+        playback.state = DebugTtsPlaybackState::Playing;
+        for _ in 0..500 {
+            playback.update_for_output(1.200);
+        }
+
+        assert!(playback.dynamic_target_sec() < 1.200);
+        assert!(playback.dynamic_target_sec() >= playback.min_target_sec);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingPlaybackChunk {
     buffer: crate::audio::PlaybackBuffer,
@@ -223,7 +271,7 @@ struct PendingPlaybackChunk {
 }
 
 #[derive(Debug)]
-struct DebugTtsPlaybackBuffer {
+struct AdaptiveTtsJitterBuffer {
     config: PlaybackBufferConfig,
     state: DebugTtsPlaybackState,
     pending: VecDeque<PendingPlaybackChunk>,
@@ -231,10 +279,25 @@ struct DebugTtsPlaybackBuffer {
     total_audio_duration_sec: f64,
     latest_sequence: Option<u64>,
     synthesis_finished: bool,
+    dynamic_target_sec: f64,
+    min_target_sec: f64,
+    max_target_sec: f64,
+    arrival_interval_ewma_sec: Option<f64>,
+    jitter_ewma_sec: f64,
+    last_arrival_at: Option<Instant>,
+    consecutive_low_water: u32,
+    stable_ticks: u32,
+    rebuffer_count: u32,
 }
 
-impl DebugTtsPlaybackBuffer {
+impl AdaptiveTtsJitterBuffer {
     fn new(config: PlaybackBufferConfig) -> Self {
+        let initial_target_sec = config.initial_buffer_ms as f64 / 1_000.0;
+        let target_floor_sec = config.rebuffer_threshold_ms as f64 / 1_000.0 + 0.150;
+        let min_target_sec = initial_target_sec.min(0.400).max(target_floor_sec);
+        let max_target_sec = (config.rebuffer_target_ms as f64 / 1_000.0)
+            .max(initial_target_sec)
+            .max(1.800);
         Self {
             config,
             state: DebugTtsPlaybackState::InitialBuffering,
@@ -243,10 +306,20 @@ impl DebugTtsPlaybackBuffer {
             total_audio_duration_sec: 0.0,
             latest_sequence: None,
             synthesis_finished: false,
+            dynamic_target_sec: initial_target_sec.clamp(min_target_sec, max_target_sec),
+            min_target_sec,
+            max_target_sec,
+            arrival_interval_ewma_sec: None,
+            jitter_ewma_sec: 0.0,
+            last_arrival_at: None,
+            consecutive_low_water: 0,
+            stable_ticks: 0,
+            rebuffer_count: 0,
         }
     }
 
     fn push(&mut self, buffer: crate::audio::PlaybackBuffer, sequence: u64) {
+        self.record_arrival(Instant::now());
         let duration = buffer.duration().as_secs_f64();
         self.pending_duration_sec += duration;
         self.total_audio_duration_sec += duration;
@@ -255,32 +328,83 @@ impl DebugTtsPlaybackBuffer {
             .push_back(PendingPlaybackChunk { buffer, sequence });
     }
 
+    #[cfg(test)]
+    fn push_at(
+        &mut self,
+        buffer: crate::audio::PlaybackBuffer,
+        sequence: u64,
+        arrival_at: Instant,
+    ) {
+        self.record_arrival(arrival_at);
+        let duration = buffer.duration().as_secs_f64();
+        self.pending_duration_sec += duration;
+        self.total_audio_duration_sec += duration;
+        self.latest_sequence = Some(sequence);
+        self.pending
+            .push_back(PendingPlaybackChunk { buffer, sequence });
+    }
+
+    fn record_arrival(&mut self, arrival_at: Instant) {
+        if let Some(last_arrival_at) = self.last_arrival_at {
+            let interval = arrival_at.duration_since(last_arrival_at).as_secs_f64();
+            if let Some(ewma) = self.arrival_interval_ewma_sec {
+                let jitter_sample = (interval - ewma).abs();
+                self.arrival_interval_ewma_sec = Some(ewma * 0.85 + interval * 0.15);
+                self.jitter_ewma_sec = self.jitter_ewma_sec * 0.80 + jitter_sample * 0.20;
+            } else {
+                self.arrival_interval_ewma_sec = Some(interval);
+            }
+            self.raise_target_for_jitter();
+        }
+        self.last_arrival_at = Some(arrival_at);
+    }
+
     fn mark_finished(&mut self) {
         self.synthesis_finished = true;
     }
 
     fn update_for_output(&mut self, output_queued_sec: f64) {
+        let low_water_sec = self.config.rebuffer_threshold_ms as f64 / 1_000.0;
+        if matches!(self.state, DebugTtsPlaybackState::Playing) && output_queued_sec < low_water_sec
+        {
+            self.consecutive_low_water = self.consecutive_low_water.saturating_add(1);
+            self.stable_ticks = 0;
+            if self.consecutive_low_water >= 2 {
+                self.increase_target(0.080);
+            }
+        } else if matches!(self.state, DebugTtsPlaybackState::Playing)
+            && output_queued_sec >= self.dynamic_target_sec * 0.80
+        {
+            self.consecutive_low_water = 0;
+            self.stable_ticks = self.stable_ticks.saturating_add(1);
+            if self.stable_ticks >= 25 {
+                self.decrease_target(0.020);
+                self.stable_ticks = 0;
+            }
+        } else {
+            self.consecutive_low_water = 0;
+            self.stable_ticks = 0;
+        }
+
         match self.state {
             DebugTtsPlaybackState::InitialBuffering => {
-                if self.synthesis_finished
-                    || self.pending_duration_sec >= self.config.initial_buffer_ms as f64 / 1_000.0
-                {
+                if self.synthesis_finished || self.pending_duration_sec >= self.dynamic_target_sec {
                     self.state = DebugTtsPlaybackState::Playing;
                 }
             }
             DebugTtsPlaybackState::Playing => {
                 if self.synthesis_finished {
                     self.state = DebugTtsPlaybackState::Draining;
-                } else if output_queued_sec < self.config.rebuffer_threshold_ms as f64 / 1_000.0 {
+                } else if output_queued_sec < low_water_sec {
+                    self.rebuffer_count = self.rebuffer_count.saturating_add(1);
+                    self.increase_target(0.120);
                     self.state = DebugTtsPlaybackState::Rebuffering;
                 }
             }
             DebugTtsPlaybackState::Rebuffering => {
                 if self.synthesis_finished {
                     self.state = DebugTtsPlaybackState::Draining;
-                } else if self.pending_duration_sec
-                    >= self.config.rebuffer_target_ms as f64 / 1_000.0
-                {
+                } else if self.pending_duration_sec >= self.rebuffer_resume_target_sec() {
                     self.state = DebugTtsPlaybackState::Playing;
                 }
             }
@@ -313,6 +437,42 @@ impl DebugTtsPlaybackBuffer {
         {
             self.state = DebugTtsPlaybackState::Ended;
         }
+    }
+
+    fn dynamic_target_sec(&self) -> f64 {
+        self.dynamic_target_sec
+    }
+
+    fn rebuffer_resume_target_sec(&self) -> f64 {
+        let recent_gap = self.arrival_interval_ewma_sec.unwrap_or(0.0);
+        let jitter_margin = self.jitter_ewma_sec * 2.0 + 0.080;
+        self.dynamic_target_sec
+            .max(recent_gap + jitter_margin)
+            .clamp(self.min_target_sec, self.max_target_sec)
+    }
+
+    fn raise_target_for_jitter(&mut self) {
+        if self.jitter_ewma_sec > 0.180 {
+            self.increase_target(0.180);
+        } else if self.jitter_ewma_sec > 0.080 {
+            self.increase_target(0.080);
+        }
+    }
+
+    fn increase_target(&mut self, amount_sec: f64) {
+        self.dynamic_target_sec = (self.dynamic_target_sec + amount_sec).min(self.max_target_sec);
+    }
+
+    fn decrease_target(&mut self, amount_sec: f64) {
+        self.dynamic_target_sec = (self.dynamic_target_sec - amount_sec).max(self.min_target_sec);
+    }
+
+    fn debug_metrics(&self) -> (f64, f64, u32) {
+        (
+            self.dynamic_target_sec,
+            self.jitter_ewma_sec,
+            self.rebuffer_count,
+        )
     }
 }
 
@@ -849,7 +1009,7 @@ impl TtsRuntime {
                 .await
         }));
 
-        let mut playback = DebugTtsPlaybackBuffer::new(playback_config);
+        let mut playback = AdaptiveTtsJitterBuffer::new(playback_config);
         let mut first_audio_at: Option<Instant> = None;
         let mut last_event_at = Instant::now();
         let mut stream_result: Option<Result<TtsResult, TtsError>> = None;
@@ -894,6 +1054,9 @@ impl TtsRuntime {
                 .map(|output| output.queued_duration().as_secs_f64())
                 .unwrap_or(0.0);
             playback.update_for_output(output_queued_sec);
+            if let Some(output) = self.inner.lock().output.as_ref() {
+                output.configure_adaptive_playback(playback.dynamic_target_sec());
+            }
             if playback.should_flush_pending() {
                 while let Some(chunk) = playback.pop_pending() {
                     if first_audio_at.is_none() {
@@ -926,6 +1089,16 @@ impl TtsRuntime {
                 || playback.latest_sequence.is_some()
                 || matches!(playback.state, DebugTtsPlaybackState::Ended)
             {
+                let (target_sec, jitter_sec, rebuffer_count) = playback.debug_metrics();
+                log::debug!(
+                    "adaptive TTS playback: state={:?} target_ms={} jitter_ms={} pending_ms={} output_ms={} rebuffer_count={}",
+                    playback.state,
+                    (target_sec * 1_000.0).round() as u64,
+                    (jitter_sec * 1_000.0).round() as u64,
+                    (playback.pending_duration_sec * 1_000.0).round() as u64,
+                    (output_queued_sec * 1_000.0).round() as u64,
+                    rebuffer_count
+                );
                 let kind = if matches!(playback.state, DebugTtsPlaybackState::Ended) {
                     DebugTtsStreamEventKind::End
                 } else {

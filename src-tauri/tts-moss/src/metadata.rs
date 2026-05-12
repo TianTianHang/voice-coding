@@ -233,7 +233,8 @@ impl CodecDecodeStepState {
                         cache.cached_positions_input_name.clone(),
                         cache.cached_positions_output_name.clone(),
                         cache.positions_shape.clone(),
-                    ),
+                    )
+                    .with_fill(-1),
                 })
             })
             .collect::<Result<Vec<_>, MossTtsError>>()?;
@@ -318,6 +319,11 @@ impl NamedI32TensorState {
             shape,
             data: vec![0; len],
         }
+    }
+
+    fn with_fill(mut self, value: i32) -> Self {
+        self.data.fill(value);
+        self
     }
 
     fn update_from_outputs(

@@ -735,17 +735,37 @@ fn extract_owned_f32_tensor(
     })
 }
 
+const DEFAULT_MOSS_TTS_INTRA_THREADS: usize = 2;
+const MOSS_TTS_INTRA_THREADS_ENV: &str = "MOSS_TTS_INTRA_THREADS";
+
 fn create_session(path: &Path, model_name: &'static str) -> Result<Session, MossTtsError> {
+    let intra_threads = moss_tts_intra_threads();
     Session::builder()
         .and_then(|b| {
             b.with_optimization_level(GraphOptimizationLevel::Level3)?
-                .with_intra_threads(0)?
+                .with_intra_threads(intra_threads)?
+                .with_inter_threads(1)?
                 .commit_from_file(path)
         })
         .map_err(|e| MossTtsError::Inference {
             stage: "session_init",
             detail: format!("{model_name}: {e}"),
         })
+}
+
+fn moss_tts_intra_threads() -> usize {
+    std::env::var(MOSS_TTS_INTRA_THREADS_ENV)
+        .ok()
+        .and_then(|value| parse_moss_tts_intra_threads(&value))
+        .unwrap_or(DEFAULT_MOSS_TTS_INTRA_THREADS)
+}
+
+fn parse_moss_tts_intra_threads(value: &str) -> Option<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|threads| *threads > 0)
 }
 
 fn validate_session_io<I, O>(
