@@ -14,6 +14,7 @@ import {
   type AgentConnectionState,
   type AgentEvent,
 } from "../hooks/useAgentEvents";
+import { useBusinessApi, type SpeechOutputStatus } from "../hooks/useBusinessApi";
 import { AgentEventStream } from "./AgentEventStream";
 import { AudioVisualizer } from "./AudioVisualizer";
 
@@ -197,6 +198,80 @@ export function autoTtsStatusLabel(status?: AutoTtsStatusSnapshot | null): strin
   return "自动播报已开启";
 }
 
+function emptyTtsModelSnapshot(): ModelPathSnapshot {
+  return {
+    kind: "tts",
+    modelId: "",
+    engineName: "",
+    packageDir: "",
+    modelDir: "",
+    source: "devFallback",
+    legacyLayout: false,
+    missingFiles: [],
+  };
+}
+
+function isTtsStatusSnapshot(value: unknown): value is TtsStatusSnapshot {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "state" in value &&
+    "engineName" in value &&
+    "model" in value &&
+    "hasBufferedAudio" in value
+  );
+}
+
+function ttsStatusFromSpeech(
+  speech: SpeechOutputStatus,
+  value: unknown,
+): TtsStatusSnapshot {
+  if (isTtsStatusSnapshot(value)) {
+    return value;
+  }
+
+  return {
+    state:
+      speech.state === "synthesizing"
+        ? "synthesizing"
+        : speech.state === "ready"
+          ? "ready"
+          : speech.state === "playing"
+            ? "playing"
+            : speech.state === "failed"
+              ? "failed"
+              : "idle",
+    engineName: "",
+    model: emptyTtsModelSnapshot(),
+    error: speech.error,
+    hasBufferedAudio: speech.state === "ready" || speech.state === "playing",
+  };
+}
+
+function autoTtsStatusFromBusiness(
+  speech?: SpeechOutputStatus,
+  tts?: unknown,
+): AutoTtsStatusSnapshot | null {
+  if (!speech) {
+    return null;
+  }
+
+  return {
+    enabled: speech.autoSpeakAgentResults,
+    isPlaying: speech.state === "playing",
+    lastStatus: !speech.autoSpeakAgentResults
+      ? "disabled"
+      : speech.state === "playing"
+        ? "speaking"
+        : speech.state === "stopping"
+          ? "stopped"
+          : speech.state === "failed"
+            ? "failed"
+            : "idle",
+    tts: ttsStatusFromSpeech(speech, tts),
+  };
+}
+
 export function AssistantConsole() {
   const [closeBehavior, setCloseBehaviorState] = useState<"hide" | "exit">(
     "hide",
@@ -217,32 +292,20 @@ export function AssistantConsole() {
   } = useBackendVAD();
   const { status: asrStatus, error: asrStatusError } = useAsrStatus();
   const agent = useAgentEvents();
+  const business = useBusinessApi();
   const latestAgentEvent =
     agent.events.length > 0 ? agent.events[agent.events.length - 1] : undefined;
 
   useEffect(() => {
-    let active = true;
-
-    async function loadAutoTtsStatus() {
-      try {
-        const status = await invoke<AutoTtsStatusSnapshot>("get_auto_tts_status");
-        if (!active) {
-          return;
-        }
-        setAutoTtsStatus(status);
-      } catch {
-        if (!active) {
-          return;
-        }
-      }
+    const status = autoTtsStatusFromBusiness(
+      business.status?.speech,
+      business.status?.tts,
+    );
+    if (!status) {
+      return;
     }
-
-    void loadAutoTtsStatus();
-
-    return () => {
-      active = false;
-    };
-  }, []);
+    setAutoTtsStatus((current) => ({ ...current, ...status }));
+  }, [business.status?.speech, business.status?.tts]);
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;

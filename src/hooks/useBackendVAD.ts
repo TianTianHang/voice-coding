@@ -257,7 +257,7 @@ export function useBackendVAD(): BackendVADResult {
     setError(null);
     awaitingNewSessionRef.current = true;
     try {
-      await invoke("start_listening");
+      await invoke("debug_start_listening");
     } catch (e) {
       setError(String(e));
       awaitingNewSessionRef.current = false;
@@ -266,7 +266,7 @@ export function useBackendVAD(): BackendVADResult {
 
   const stopListening = useCallback(async () => {
     try {
-      await invoke("stop_listening");
+      await invoke("debug_stop_listening");
     } catch (e) {
       setError(String(e));
     }

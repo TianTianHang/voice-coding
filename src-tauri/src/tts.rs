@@ -883,7 +883,7 @@ impl TtsEngine for MockTtsEngine {
 }
 
 #[tauri::command]
-pub async fn prepare_tts(
+pub async fn debug_prepare_tts(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
 ) -> Result<TtsStatusSnapshot, String> {
@@ -891,12 +891,14 @@ pub async fn prepare_tts(
 }
 
 #[tauri::command]
-pub fn get_tts_status(runtime: tauri::State<'_, TtsRuntime>) -> Result<TtsStatusSnapshot, String> {
+pub fn debug_get_tts_status(
+    runtime: tauri::State<'_, TtsRuntime>,
+) -> Result<TtsStatusSnapshot, String> {
     Ok(runtime.status())
 }
 
 #[tauri::command]
-pub async fn synthesize_tts(
+pub async fn debug_synthesize_tts(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
     text: String,
@@ -908,7 +910,7 @@ pub async fn synthesize_tts(
 }
 
 #[tauri::command]
-pub async fn play_tts(
+pub async fn debug_play_tts(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
     vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
@@ -920,7 +922,7 @@ pub async fn play_tts(
 }
 
 #[tauri::command]
-pub async fn cancel_tts_playback(
+pub async fn debug_cancel_tts_playback(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
     vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
@@ -940,14 +942,14 @@ pub async fn cancel_tts_playback(
 }
 
 #[tauri::command]
-pub fn get_auto_tts_status(
+pub fn debug_get_auto_tts_status(
     runtime: tauri::State<'_, TtsRuntime>,
 ) -> Result<AutoTtsStatusSnapshot, String> {
     Ok(runtime.auto_status())
 }
 
 #[tauri::command]
-pub fn set_auto_tts_enabled(
+pub fn debug_set_auto_tts_enabled(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
     enabled: bool,
@@ -956,7 +958,7 @@ pub fn set_auto_tts_enabled(
 }
 
 #[tauri::command]
-pub async fn stop_auto_tts(
+pub async fn debug_stop_auto_tts(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
     vad_state: tauri::State<'_, crate::vad_commands::VadRecorderState>,
@@ -981,7 +983,7 @@ pub async fn stop_auto_tts(
 }
 
 #[tauri::command]
-pub async fn speak_latest_result(
+pub async fn debug_speak_latest_result(
     app: AppHandle,
     runtime: tauri::State<'_, TtsRuntime>,
 ) -> Result<AutoTtsStatusSnapshot, String> {

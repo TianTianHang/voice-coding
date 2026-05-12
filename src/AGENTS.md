@@ -11,10 +11,10 @@ Frontend source for the Tauri desktop UI. This layer renders the voice-first ass
 
 ## Backend Links
 - Commands are called with `invoke` from `@tauri-apps/api/core`; registered command names live in `src-tauri/src/lib.rs`.
-- Voice recording uses `start_listening`, `stop_listening`, `get_vad_state`, `get_vad_config`, and `set_vad_config` from `src-tauri/src/vad_commands.rs`.
-- ASR status uses `get_asr_status` and `prepare_asr` from `src-tauri/src/asr.rs`.
+- Voice recording debug/compat hooks use `debug_start_listening`, `debug_stop_listening`, `debug_get_vad_state`, `debug_get_vad_config`, and `debug_set_vad_config`; new product flows should use business voice-session commands.
+- ASR debug/compat status uses `debug_get_asr_status` and `debug_prepare_asr`; new product flows should prefer `get_app_status`/`prepare_app`.
 - Agent console commands use `connect_agent`, `disconnect_agent`, `get_agent_status`, `send_agent_prompt`, and `respond_agent_confirmation` from `src-tauri/src/acp/session.rs`.
-- TTS controls use `prepare_tts`, `get_tts_status`, `synthesize_tts`, `play_tts`, and `cancel_tts_playback` from `src-tauri/src/tts.rs`.
+- TTS debug controls use `debug_prepare_tts`, `debug_get_tts_status`, `debug_synthesize_tts`, `debug_play_tts`, and `debug_cancel_tts_playback`; new product flows should use speech business commands.
 
 ## Event Contracts
 - `vad-state` carries `{ state, sessionId }`; treat it as the source of truth for recording state.

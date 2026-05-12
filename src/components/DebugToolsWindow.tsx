@@ -174,7 +174,7 @@ export function DebugToolsWindow() {
 
     async function loadRuntimeState() {
       try {
-        const config = await invoke<VadRuntimeConfig>("get_vad_config");
+        const config = await invoke<VadRuntimeConfig>("debug_get_vad_config");
         if (active) {
           setVadThresholdInput(config.threshold.toString());
         }
@@ -185,7 +185,7 @@ export function DebugToolsWindow() {
       }
 
       try {
-        const status = await invoke<TtsStatusSnapshot>("get_tts_status");
+        const status = await invoke<TtsStatusSnapshot>("debug_get_tts_status");
         if (active) {
           setTtsStatus(status);
         }
@@ -196,7 +196,7 @@ export function DebugToolsWindow() {
       }
 
       try {
-        const status = await invoke<AutoTtsStatusSnapshot>("get_auto_tts_status");
+        const status = await invoke<AutoTtsStatusSnapshot>("debug_get_auto_tts_status");
         if (active) {
           setAutoTtsStatus(status);
           setTtsStatus(status.tts);
@@ -303,7 +303,7 @@ export function DebugToolsWindow() {
     setIsSavingVadConfig(true);
     setVadConfigMessage(null);
     try {
-      await invoke("set_vad_config", {
+      await invoke("debug_set_vad_config", {
         config: { threshold: parsed },
       });
       setVadConfigMessage(
@@ -326,7 +326,7 @@ export function DebugToolsWindow() {
     setIsSynthesizingTts(true);
     setTtsMessage(null);
     try {
-      const status = await invoke<TtsStatusSnapshot>("synthesize_tts", {
+      const status = await invoke<TtsStatusSnapshot>("debug_synthesize_tts", {
         text,
         config: buildTtsInvokeConfig(ttsSamplingMode, ttsReferenceAudioPath),
       });
@@ -350,7 +350,7 @@ export function DebugToolsWindow() {
     setIsPlayingTts(true);
     setTtsMessage(null);
     try {
-      const status = await invoke<TtsStatusSnapshot>("play_tts");
+      const status = await invoke<TtsStatusSnapshot>("debug_play_tts");
       setTtsStatus(status);
       setTtsMessage("Playback finished.");
     } catch (error) {
@@ -366,7 +366,7 @@ export function DebugToolsWindow() {
   async function cancelTtsPlayback() {
     setTtsMessage(null);
     try {
-      const status = await invoke<TtsStatusSnapshot>("cancel_tts_playback");
+      const status = await invoke<TtsStatusSnapshot>("debug_cancel_tts_playback");
       setTtsStatus(status);
       setTtsMessage("Playback cancelled.");
     } catch (error) {
@@ -379,7 +379,7 @@ export function DebugToolsWindow() {
     setTtsMessage(null);
     try {
       const status = await invoke<AutoTtsStatusSnapshot>(
-        "set_auto_tts_enabled",
+        "debug_set_auto_tts_enabled",
         { enabled },
       );
       setAutoTtsStatus(status);
@@ -395,7 +395,7 @@ export function DebugToolsWindow() {
     setIsUpdatingAutoTts(true);
     setTtsMessage(null);
     try {
-      const status = await invoke<AutoTtsStatusSnapshot>("stop_auto_tts");
+      const status = await invoke<AutoTtsStatusSnapshot>("debug_stop_auto_tts");
       setAutoTtsStatus(status);
       setTtsStatus(status.tts);
     } catch (error) {
@@ -409,7 +409,7 @@ export function DebugToolsWindow() {
     setIsUpdatingAutoTts(true);
     setTtsMessage(null);
     try {
-      const status = await invoke<AutoTtsStatusSnapshot>("speak_latest_result");
+      const status = await invoke<AutoTtsStatusSnapshot>("debug_speak_latest_result");
       setAutoTtsStatus(status);
       setTtsStatus(status.tts);
     } catch (error) {

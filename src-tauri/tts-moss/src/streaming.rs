@@ -171,9 +171,9 @@ impl StreamingTts for MossOnnxTtsEngine {
 #[async_trait::async_trait]
 impl<'stream> StreamingTtsSession for MossStreamSession<'stream> {
     async fn push_text(&mut self, chunk: StreamingTextChunk) -> tts_core::Result<()> {
-        if self.finished || self.started {
+        if self.finished {
             return Err(TtsError::InvalidInput(
-                "cannot push text after stream processing has started".to_string(),
+                "cannot push text after stream finished".to_string(),
             ));
         }
         self.buffer.push_str(&chunk.text);

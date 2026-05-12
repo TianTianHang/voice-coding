@@ -527,6 +527,31 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn stream_session_accepts_text_after_worker_starts() {
+        let fixture = MossFixture::new();
+        let assets = MossAssets::load(MossModelConfig {
+            model_dir: fixture.tts_dir,
+        })
+        .unwrap();
+        let engine = MossOnnxTtsEngine::from_assets_for_test(assets);
+        let mut session = MossStreamSession::new(&engine, TtsConfig::default());
+
+        session
+            .push_text(StreamingTextChunk::new("hello.").with_flush(true))
+            .await
+            .expect("first flushed chunk should start the worker");
+
+        let result = session
+            .push_text(StreamingTextChunk::final_chunk("world."))
+            .await;
+
+        assert!(
+            !matches!(result, Err(TtsError::InvalidInput(ref message)) if message.contains("started")),
+            "stream should accept chunks after processing has started: {result:?}"
+        );
+    }
+
     #[test]
     fn stream_session_finish_result_matches_end_event_result() {
         let (events, finish_result) =

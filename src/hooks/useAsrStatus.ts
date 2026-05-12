@@ -102,7 +102,7 @@ export function useAsrStatus(): AsrStatusResult {
     let unlisten: (() => void) | null = null;
 
     async function setup() {
-      const current = await invoke<AsrStatusSnapshot>("get_asr_status");
+      const current = await invoke<AsrStatusSnapshot>("debug_get_asr_status");
       if (!disposed) {
         setStatus(current);
       }
@@ -112,7 +112,7 @@ export function useAsrStatus(): AsrStatusResult {
         setError(null);
       });
 
-      const prepared = await invoke<AsrStatusSnapshot>("prepare_asr");
+      const prepared = await invoke<AsrStatusSnapshot>("debug_prepare_asr");
       if (!disposed) {
         setStatus(prepared);
       }

@@ -649,7 +649,7 @@ pub async fn get_app_status(app: AppHandle) -> Result<AppStatus, String> {
     let business = app.state::<BusinessRuntime>();
     let tts = app.state::<crate::tts::TtsRuntime>().status();
     let agent = app.state::<crate::acp::AcpRuntime>().status();
-    let asr = match crate::asr::get_asr_status().await {
+    let asr = match crate::asr::asr_status_runtime().await {
         Ok(status) => serde_json::to_value(status).map_err(|e| e.to_string())?,
         Err(error) => serde_json::json!({ "state": "failed", "error": error }),
     };
@@ -671,7 +671,7 @@ pub async fn prepare_app(app: AppHandle) -> Result<AppStatus, String> {
     let business = app.state::<BusinessRuntime>();
     business.set_app_readiness(&app, AppReadiness::Initializing, None);
 
-    let asr = crate::asr::prepare_asr(app.clone()).await;
+    let asr = crate::asr::prepare_asr_runtime(app.clone()).await;
     let tts = app
         .state::<crate::tts::TtsRuntime>()
         .prepare(Some(&app))
@@ -721,7 +721,24 @@ pub async fn start_voice_session(
     runtime: tauri::State<'_, BusinessRuntime>,
 ) -> Result<VoiceSessionStatus, String> {
     runtime.set_voice_status(&app, None, VoiceSessionState::Starting, None, None);
-    crate::vad_commands::start_listening(app.clone(), vad_state.clone(), vad_config_state).await?;
+    if let Err(err) = crate::vad_commands::start_listening_runtime(
+        app.clone(),
+        vad_state.clone(),
+        vad_config_state,
+    )
+    .await
+    {
+        let session_id = vad_state.current_active_session();
+        runtime.set_voice_status(
+            &app,
+            session_id,
+            VoiceSessionState::Failed,
+            None,
+            Some(err.clone()),
+        );
+        emit_runtime_error(&app, "voice", err.clone(), true);
+        return Err(err);
+    }
     let session_id = vad_state.current_active_session();
     Ok(runtime.set_voice_status(&app, session_id, VoiceSessionState::Listening, None, None))
 }
@@ -734,7 +751,7 @@ pub fn stop_voice_session(
 ) -> Result<VoiceSessionStatus, String> {
     let session_id = vad_state.current_active_session();
     runtime.set_voice_status(&app, session_id, VoiceSessionState::Stopping, None, None);
-    crate::vad_commands::stop_listening(app.clone(), vad_state)?;
+    crate::vad_commands::stop_listening_runtime(app.clone(), vad_state)?;
     Ok(runtime.set_voice_status(&app, None, VoiceSessionState::Idle, None, None))
 }
 
@@ -978,7 +995,7 @@ pub async fn stop_speech(
     }
     tts_runtime.cancel_playback();
     if tts_runtime.take_paused_recording() {
-        let _ = crate::vad_commands::resume_listening_after_playback(vad_state);
+        let _ = crate::vad_commands::resume_listening_after_playback_with_app(&app, vad_state);
     }
     tts_runtime.force_idle(Some(&app));
     Ok(runtime.inner.lock().speech.clone())

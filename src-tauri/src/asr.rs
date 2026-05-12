@@ -365,8 +365,7 @@ fn cleanup_temp_audio_file(file_path: &Path) -> Result<(), String> {
     }
 }
 
-#[tauri::command]
-pub async fn prepare_asr(app: tauri::AppHandle) -> Result<AsrStatusSnapshot, String> {
+pub async fn prepare_asr_runtime(app: tauri::AppHandle) -> Result<AsrStatusSnapshot, String> {
     #[cfg(feature = "stt-qwen3")]
     {
         Ok(ASR_RUNTIME.prepare(Some(app)).await)
@@ -380,7 +379,11 @@ pub async fn prepare_asr(app: tauri::AppHandle) -> Result<AsrStatusSnapshot, Str
 }
 
 #[tauri::command]
-pub async fn get_asr_status() -> Result<AsrStatusSnapshot, String> {
+pub async fn debug_prepare_asr(app: tauri::AppHandle) -> Result<AsrStatusSnapshot, String> {
+    prepare_asr_runtime(app).await
+}
+
+pub async fn asr_status_runtime() -> Result<AsrStatusSnapshot, String> {
     #[cfg(feature = "stt-qwen3")]
     {
         Ok(ASR_RUNTIME.status().await)
@@ -392,6 +395,11 @@ pub async fn get_asr_status() -> Result<AsrStatusSnapshot, String> {
     }
 }
 
+#[tauri::command]
+pub async fn debug_get_asr_status() -> Result<AsrStatusSnapshot, String> {
+    asr_status_runtime().await
+}
+
 #[cfg(feature = "stt-qwen3")]
 pub fn prewarm_asr(app: tauri::AppHandle) {
     log::info!("ASR prewarm scheduled");
@@ -401,7 +409,10 @@ pub fn prewarm_asr(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
-pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<String, String> {
+pub async fn debug_transcribe(
+    audio_path: String,
+    language: Option<String>,
+) -> Result<String, String> {
     #[cfg(feature = "stt-qwen3")]
     {
         let started = Instant::now();
@@ -438,7 +449,7 @@ pub async fn transcribe(audio_path: String, language: Option<String>) -> Result<
 }
 
 #[tauri::command]
-pub async fn transcribe_audio_data(
+pub async fn debug_transcribe_audio_data(
     audio_data: Vec<u8>,
     language: Option<String>,
 ) -> Result<String, String> {
@@ -587,16 +598,15 @@ fn run_debug_streaming_asr(
         ..Default::default()
     };
 
-    let mut stream = tauri::async_runtime::block_on(engine.start_stream(config))
-        .map_err(|e| e.to_string())?;
+    let mut stream =
+        tauri::async_runtime::block_on(engine.start_stream(config)).map_err(|e| e.to_string())?;
     let mut events = Vec::new();
     let chunk_size = 4_000usize;
 
     for chunk in samples.chunks(chunk_size) {
-        tauri::async_runtime::block_on(stream.push_audio(StreamingAudioChunk::new(
-            chunk.to_vec(),
-            16_000,
-        )))
+        tauri::async_runtime::block_on(
+            stream.push_audio(StreamingAudioChunk::new(chunk.to_vec(), 16_000)),
+        )
         .map_err(|e| e.to_string())?;
         drain_debug_streaming_events(&app, &run_id, stream.as_mut(), &mut events)?;
     }
@@ -624,37 +634,50 @@ fn drain_debug_streaming_events(
     events: &mut Vec<DebugStreamingAsrEvent>,
 ) -> Result<(), String> {
     loop {
-        let event = tauri::async_runtime::block_on(stream.next_event()).map_err(|e| e.to_string())?;
+        let event =
+            tauri::async_runtime::block_on(stream.next_event()).map_err(|e| e.to_string())?;
         let Some(event) = event else {
             break;
         };
         match event {
             stt_core::StreamingSttEvent::Partial(transcript) => {
-                push_debug_streaming_asr_event(app, events, DebugStreamingAsrEvent {
-                    run_id: run_id.to_string(),
-                    kind: "partial".to_string(),
-                    text: transcript.text,
-                    language: transcript.language,
-                    end_time_sec: transcript.end_time_sec,
-                });
+                push_debug_streaming_asr_event(
+                    app,
+                    events,
+                    DebugStreamingAsrEvent {
+                        run_id: run_id.to_string(),
+                        kind: "partial".to_string(),
+                        text: transcript.text,
+                        language: transcript.language,
+                        end_time_sec: transcript.end_time_sec,
+                    },
+                );
             }
             stt_core::StreamingSttEvent::Final(transcript) => {
-                push_debug_streaming_asr_event(app, events, DebugStreamingAsrEvent {
-                    run_id: run_id.to_string(),
-                    kind: "final".to_string(),
-                    text: transcript.text,
-                    language: transcript.language,
-                    end_time_sec: transcript.end_time_sec,
-                });
+                push_debug_streaming_asr_event(
+                    app,
+                    events,
+                    DebugStreamingAsrEvent {
+                        run_id: run_id.to_string(),
+                        kind: "final".to_string(),
+                        text: transcript.text,
+                        language: transcript.language,
+                        end_time_sec: transcript.end_time_sec,
+                    },
+                );
             }
             stt_core::StreamingSttEvent::End(result) => {
-                push_debug_streaming_asr_event(app, events, DebugStreamingAsrEvent {
-                    run_id: run_id.to_string(),
-                    kind: "end".to_string(),
-                    text: result.text,
-                    language: Some(result.language),
-                    end_time_sec: Some(result.timing.audio_duration_sec),
-                });
+                push_debug_streaming_asr_event(
+                    app,
+                    events,
+                    DebugStreamingAsrEvent {
+                        run_id: run_id.to_string(),
+                        kind: "end".to_string(),
+                        text: result.text,
+                        language: Some(result.language),
+                        end_time_sec: Some(result.timing.audio_duration_sec),
+                    },
+                );
             }
         }
     }

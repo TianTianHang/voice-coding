@@ -20,7 +20,7 @@ export function useTranscription(): TranscriptionResult {
       setError(null);
 
       try {
-        const result = await invoke<string>("transcribe_audio_data", {
+        const result = await invoke<string>("debug_transcribe_audio_data", {
           audioData: Array.from(audioData),
           language: language ?? null,
         });

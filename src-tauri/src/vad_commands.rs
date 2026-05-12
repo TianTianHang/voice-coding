@@ -208,8 +208,7 @@ async fn transcribe_audio_internal(
     }
 }
 
-#[tauri::command]
-pub async fn start_listening(
+pub async fn start_listening_runtime(
     app: AppHandle,
     state: tauri::State<'_, VadRecorderState>,
     config_state: tauri::State<'_, VadRuntimeConfigState>,
@@ -396,14 +395,23 @@ pub async fn start_listening(
 }
 
 #[tauri::command]
-pub fn get_vad_config(
+pub async fn debug_start_listening(
+    app: AppHandle,
+    state: tauri::State<'_, VadRecorderState>,
+    config_state: tauri::State<'_, VadRuntimeConfigState>,
+) -> Result<(), String> {
+    start_listening_runtime(app, state, config_state).await
+}
+
+#[tauri::command]
+pub fn debug_get_vad_config(
     state: tauri::State<'_, VadRuntimeConfigState>,
 ) -> Result<VadRuntimeConfig, String> {
     Ok(state.get())
 }
 
 #[tauri::command]
-pub fn set_vad_config(
+pub fn debug_set_vad_config(
     state: tauri::State<'_, VadRuntimeConfigState>,
     config: VadRuntimeConfig,
 ) -> Result<(), String> {
@@ -421,8 +429,7 @@ fn validate_threshold(threshold: f32) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn stop_listening(
+pub fn stop_listening_runtime(
     app: AppHandle,
     state: tauri::State<'_, VadRecorderState>,
 ) -> Result<(), String> {
@@ -458,6 +465,14 @@ pub fn stop_listening(
     }
 
     Ok(())
+}
+
+#[tauri::command]
+pub fn debug_stop_listening(
+    app: AppHandle,
+    state: tauri::State<'_, VadRecorderState>,
+) -> Result<(), String> {
+    stop_listening_runtime(app, state)
 }
 
 pub fn pause_listening_for_playback(
@@ -545,7 +560,7 @@ pub fn resume_listening_after_playback_with_app(
 }
 
 #[tauri::command]
-pub fn get_vad_state(state: tauri::State<'_, VadRecorderState>) -> Result<String, String> {
+pub fn debug_get_vad_state(state: tauri::State<'_, VadRecorderState>) -> Result<String, String> {
     if state.current_active_session().is_none() {
         return Ok(VadState::Idle.to_string());
     }

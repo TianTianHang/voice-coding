@@ -93,7 +93,7 @@ pub fn run() {
                         log::info!("main window close requested; exiting application");
                         let app = app.clone();
                         tauri::async_runtime::spawn(async move {
-                            let _ = vad_commands::stop_listening(
+                            let _ = vad_commands::stop_listening_runtime(
                                 app.clone(),
                                 app.state::<vad_commands::VadRecorderState>(),
                             );
@@ -106,20 +106,20 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            asr::prepare_asr,
-            asr::get_asr_status,
-            asr::transcribe,
-            asr::transcribe_audio_data,
+            asr::debug_prepare_asr,
+            asr::debug_get_asr_status,
+            asr::debug_transcribe,
+            asr::debug_transcribe_audio_data,
             asr::debug_streaming_asr,
-            tts::prepare_tts,
-            tts::get_tts_status,
-            tts::synthesize_tts,
-            tts::play_tts,
-            tts::cancel_tts_playback,
-            tts::get_auto_tts_status,
-            tts::set_auto_tts_enabled,
-            tts::stop_auto_tts,
-            tts::speak_latest_result,
+            tts::debug_prepare_tts,
+            tts::debug_get_tts_status,
+            tts::debug_synthesize_tts,
+            tts::debug_play_tts,
+            tts::debug_cancel_tts_playback,
+            tts::debug_get_auto_tts_status,
+            tts::debug_set_auto_tts_enabled,
+            tts::debug_stop_auto_tts,
+            tts::debug_speak_latest_result,
             business::get_app_status,
             business::prepare_app,
             business::get_app_preferences,
@@ -140,11 +140,11 @@ pub fn run() {
             business::stop_speech,
             business::get_speech_status,
             business::set_speech_preferences,
-            vad_commands::start_listening,
-            vad_commands::stop_listening,
-            vad_commands::get_vad_state,
-            vad_commands::get_vad_config,
-            vad_commands::set_vad_config,
+            vad_commands::debug_start_listening,
+            vad_commands::debug_stop_listening,
+            vad_commands::debug_get_vad_state,
+            vad_commands::debug_get_vad_config,
+            vad_commands::debug_set_vad_config,
             acp::session::connect_agent,
             acp::session::disconnect_agent,
             acp::session::get_agent_status,
@@ -177,7 +177,7 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
                 log::info!("tray quit requested");
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
-                    let _ = vad_commands::stop_listening(
+                    let _ = vad_commands::stop_listening_runtime(
                         app.clone(),
                         app.state::<vad_commands::VadRecorderState>(),
                     );

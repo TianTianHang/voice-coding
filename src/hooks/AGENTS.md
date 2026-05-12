@@ -3,9 +3,9 @@
 Custom React hooks that bridge the frontend to Tauri backend commands and event streams. This folder owns session filtering, event merging, and UI-ready state snapshots.
 
 ## Module Map
-- `useBackendVAD.ts` manages VAD lifecycle commands, session ids, transcript/error event filtering, and recording duration.
-- `useTranscription.ts` wraps direct transcription flows.
-- `useAsrStatus.ts` tracks ASR preload/readiness state from commands and `asr-status` events.
+- `useBackendVAD.ts` is a compatibility/debug hook for legacy VAD lifecycle commands, session ids, transcript/error event filtering, and recording duration.
+- `useTranscription.ts` wraps direct debug transcription flows.
+- `useAsrStatus.ts` tracks debug ASR preload/readiness state from commands and `asr-status` events.
 - `useAgentEvents.ts` manages ACP connection state, event upserts/appends, confirmations, plans, and session state.
 
 ## Backend Links
@@ -15,7 +15,7 @@ Custom React hooks that bridge the frontend to Tauri backend commands and event 
 
 ## Invariants
 - Backend session ids are authoritative; stale `transcript`, `error`, or `vad-state` payloads must not mutate current UI state.
-- `stop_listening` invalidates the backend session; frontend should wait for backend `vad-state` rather than forcing idle.
+- `debug_stop_listening` invalidates the backend session; frontend should wait for backend `vad-state` rather than forcing idle.
 - Event listeners must be disposed and guarded against updates after unmount.
 - Agent tool events are upserted by tool call id; message events may append into existing message ids.
 
