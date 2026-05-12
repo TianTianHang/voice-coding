@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -6,7 +7,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{sleep, Duration};
 #[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
 use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
-use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult, TtsSynthesisEvent};
+use tts_core::{
+    PlaybackBufferConfig, TtsConfig, TtsEngine, TtsError, TtsResult, TtsSynthesisEvent,
+};
 
 use crate::audio::{playback_buffer_from_tts, AudioOutput};
 use crate::model_paths::{
@@ -41,8 +44,11 @@ pub struct TtsStatusSnapshot {
 pub struct DebugTtsStreamEvent {
     pub run_id: String,
     pub kind: DebugTtsStreamEventKind,
+    pub buffer_state: DebugTtsBufferState,
     pub queued_duration_sec: f64,
     pub playback_position_sec: f64,
+    pub pending_duration_sec: f64,
+    pub output_queued_duration_sec: f64,
     pub progress: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sequence: Option<u64>,
@@ -59,6 +65,16 @@ pub enum DebugTtsStreamEventKind {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DebugTtsBufferState {
+    InitialBuffering,
+    Playing,
+    Rebuffering,
+    Draining,
+    Ended,
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DebugTtsStreamResult {
@@ -71,8 +87,11 @@ impl DebugTtsStreamEvent {
         Self {
             run_id,
             kind,
+            buffer_state: DebugTtsBufferState::InitialBuffering,
             queued_duration_sec: 0.0,
             playback_position_sec: 0.0,
+            pending_duration_sec: 0.0,
+            output_queued_duration_sec: 0.0,
             progress: 0.0,
             sequence: None,
             error: None,
@@ -82,8 +101,11 @@ impl DebugTtsStreamEvent {
     fn progress(
         run_id: String,
         kind: DebugTtsStreamEventKind,
+        buffer_state: DebugTtsBufferState,
         queued_duration_sec: f64,
         playback_position_sec: f64,
+        pending_duration_sec: f64,
+        output_queued_duration_sec: f64,
     ) -> Self {
         let progress = if queued_duration_sec > 0.0 {
             (playback_position_sec / queued_duration_sec).clamp(0.0, 1.0)
@@ -93,8 +115,11 @@ impl DebugTtsStreamEvent {
         Self {
             run_id,
             kind,
+            buffer_state,
             queued_duration_sec,
             playback_position_sec,
+            pending_duration_sec,
+            output_queued_duration_sec,
             progress,
             sequence: None,
             error: None,
@@ -114,6 +139,181 @@ impl DebugTtsStreamEvent {
 
 fn emit_debug_tts_stream_event(app: &AppHandle, event: DebugTtsStreamEvent) {
     let _ = app.emit("debug-tts-stream", event);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DebugTtsPlaybackState {
+    InitialBuffering,
+    Playing,
+    Rebuffering,
+    Draining,
+    Ended,
+}
+
+#[cfg(test)]
+mod debug_playback_buffer_tests {
+    use super::*;
+
+    fn buffer(ms: u64) -> crate::audio::PlaybackBuffer {
+        let samples =
+            PLAYBACK_SAMPLE_RATE_HZ as usize * PLAYBACK_CHANNELS as usize * ms as usize / 1_000;
+        crate::audio::PlaybackBuffer::from_samples(vec![0.0; samples])
+    }
+
+    #[test]
+    fn waits_for_initial_buffer_before_playing() {
+        let mut playback = DebugTtsPlaybackBuffer::new(PlaybackBufferConfig::default());
+        playback.push(buffer(300), 1);
+        playback.update_for_output(0.0);
+        assert_eq!(playback.state, DebugTtsPlaybackState::InitialBuffering);
+        assert!(!playback.should_flush_pending());
+
+        playback.push(buffer(300), 2);
+        playback.update_for_output(0.0);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
+        assert!(playback.should_flush_pending());
+    }
+
+    #[test]
+    fn rebuffering_waits_for_target_then_resumes() {
+        let mut playback = DebugTtsPlaybackBuffer::new(PlaybackBufferConfig::default());
+        playback.push(buffer(600), 1);
+        playback.update_for_output(0.0);
+        while playback.pop_pending().is_some() {}
+
+        playback.update_for_output(0.100);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Rebuffering);
+        playback.push(buffer(300), 2);
+        playback.update_for_output(0.100);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Rebuffering);
+
+        playback.push(buffer(300), 3);
+        playback.update_for_output(0.100);
+        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
+    }
+
+    #[test]
+    fn final_chunk_drains_even_below_initial_buffer() {
+        let mut playback = DebugTtsPlaybackBuffer::new(PlaybackBufferConfig::default());
+        playback.push(buffer(120), 1);
+        playback.mark_finished();
+        playback.update_for_output(0.0);
+
+        assert_eq!(playback.state, DebugTtsPlaybackState::Playing);
+        assert!(playback.should_flush_pending());
+    }
+}
+
+impl DebugTtsPlaybackState {
+    fn as_event_state(self) -> DebugTtsBufferState {
+        match self {
+            Self::InitialBuffering => DebugTtsBufferState::InitialBuffering,
+            Self::Playing => DebugTtsBufferState::Playing,
+            Self::Rebuffering => DebugTtsBufferState::Rebuffering,
+            Self::Draining => DebugTtsBufferState::Draining,
+            Self::Ended => DebugTtsBufferState::Ended,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PendingPlaybackChunk {
+    buffer: crate::audio::PlaybackBuffer,
+    sequence: u64,
+}
+
+#[derive(Debug)]
+struct DebugTtsPlaybackBuffer {
+    config: PlaybackBufferConfig,
+    state: DebugTtsPlaybackState,
+    pending: VecDeque<PendingPlaybackChunk>,
+    pending_duration_sec: f64,
+    total_audio_duration_sec: f64,
+    latest_sequence: Option<u64>,
+    synthesis_finished: bool,
+}
+
+impl DebugTtsPlaybackBuffer {
+    fn new(config: PlaybackBufferConfig) -> Self {
+        Self {
+            config,
+            state: DebugTtsPlaybackState::InitialBuffering,
+            pending: VecDeque::new(),
+            pending_duration_sec: 0.0,
+            total_audio_duration_sec: 0.0,
+            latest_sequence: None,
+            synthesis_finished: false,
+        }
+    }
+
+    fn push(&mut self, buffer: crate::audio::PlaybackBuffer, sequence: u64) {
+        let duration = buffer.duration().as_secs_f64();
+        self.pending_duration_sec += duration;
+        self.total_audio_duration_sec += duration;
+        self.latest_sequence = Some(sequence);
+        self.pending
+            .push_back(PendingPlaybackChunk { buffer, sequence });
+    }
+
+    fn mark_finished(&mut self) {
+        self.synthesis_finished = true;
+    }
+
+    fn update_for_output(&mut self, output_queued_sec: f64) {
+        match self.state {
+            DebugTtsPlaybackState::InitialBuffering => {
+                if self.synthesis_finished
+                    || self.pending_duration_sec >= self.config.initial_buffer_ms as f64 / 1_000.0
+                {
+                    self.state = DebugTtsPlaybackState::Playing;
+                }
+            }
+            DebugTtsPlaybackState::Playing => {
+                if self.synthesis_finished {
+                    self.state = DebugTtsPlaybackState::Draining;
+                } else if output_queued_sec < self.config.rebuffer_threshold_ms as f64 / 1_000.0 {
+                    self.state = DebugTtsPlaybackState::Rebuffering;
+                }
+            }
+            DebugTtsPlaybackState::Rebuffering => {
+                if self.synthesis_finished {
+                    self.state = DebugTtsPlaybackState::Draining;
+                } else if self.pending_duration_sec
+                    >= self.config.rebuffer_target_ms as f64 / 1_000.0
+                {
+                    self.state = DebugTtsPlaybackState::Playing;
+                }
+            }
+            DebugTtsPlaybackState::Draining | DebugTtsPlaybackState::Ended => {}
+        }
+    }
+
+    fn should_flush_pending(&self) -> bool {
+        matches!(
+            self.state,
+            DebugTtsPlaybackState::Playing | DebugTtsPlaybackState::Draining
+        )
+    }
+
+    fn pop_pending(&mut self) -> Option<PendingPlaybackChunk> {
+        let chunk = self.pending.pop_front()?;
+        self.pending_duration_sec =
+            (self.pending_duration_sec - chunk.buffer.duration().as_secs_f64()).max(0.0);
+        Some(chunk)
+    }
+
+    fn finish_if_drained(&mut self, output_queued_sec: f64) {
+        if self.synthesis_finished
+            && self.pending.is_empty()
+            && output_queued_sec <= 0.005
+            && matches!(
+                self.state,
+                DebugTtsPlaybackState::Playing | DebugTtsPlaybackState::Draining
+            )
+        {
+            self.state = DebugTtsPlaybackState::Ended;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -599,6 +799,7 @@ impl TtsRuntime {
         if text.trim().is_empty() {
             return Err("TTS text must not be empty".to_string());
         }
+        let playback_config = PlaybackBufferConfig::from_stream_config(config.stream.as_ref());
 
         {
             let mut inner = self.inner.lock();
@@ -633,57 +834,142 @@ impl TtsRuntime {
             DebugTtsStreamEvent::new(run_id.clone(), DebugTtsStreamEventKind::Started),
         );
 
-        let queued_duration = Arc::new(Mutex::new(0.0f64));
-        let first_audio_at = Arc::new(Mutex::new(None::<Instant>));
-        let output_for_events = Arc::clone(&self.inner);
-        let queued_for_events = Arc::clone(&queued_duration);
-        let first_audio_for_events = Arc::clone(&first_audio_at);
-        let app_for_events = app.clone();
-        let run_id_for_events = run_id.clone();
-        let stream_result = self
-            .engine
-            .synthesize_stream_events(
-                &text,
-                config,
-                Box::new(move |event| {
-                    if let TtsSynthesisEvent::AudioChunk(chunk) = event {
-                        let Ok(buffer) = playback_buffer_from_tts(&chunk.audio) else {
-                            return;
-                        };
-                        let queued_duration_sec = {
-                            let mut queued = queued_for_events.lock();
-                            *queued += buffer.duration().as_secs_f64();
-                            *queued
-                        };
-                        let playback_position_sec = {
-                            let mut first_audio = first_audio_for_events.lock();
-                            let first_audio = first_audio.get_or_insert_with(Instant::now);
-                            first_audio.elapsed().as_secs_f64()
-                        };
-                        if let Some(output) = output_for_events.lock().output.as_ref() {
-                            output.enqueue(buffer);
-                        }
-                        emit_debug_tts_stream_event(
-                            &app_for_events,
-                            DebugTtsStreamEvent::progress(
-                                run_id_for_events.clone(),
-                                DebugTtsStreamEventKind::Chunk,
-                                queued_duration_sec,
-                                playback_position_sec,
-                            )
-                            .with_sequence(chunk.sequence),
-                        );
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let engine = Arc::clone(&self.engine);
+        let synth_text = text.clone();
+        let mut synth_task = Some(tokio::spawn(async move {
+            engine
+                .synthesize_stream_events(
+                    &synth_text,
+                    config,
+                    Box::new(move |event| {
+                        let _ = events_tx.send(event);
+                    }),
+                )
+                .await
+        }));
+
+        let mut playback = DebugTtsPlaybackBuffer::new(playback_config);
+        let mut first_audio_at: Option<Instant> = None;
+        let mut last_event_at = Instant::now();
+        let mut stream_result: Option<Result<TtsResult, TtsError>> = None;
+        loop {
+            if self.debug_stream_cancelled(playback_epoch) {
+                break;
+            }
+
+            while let Ok(event) = events_rx.try_recv() {
+                match event {
+                    TtsSynthesisEvent::AudioChunk(chunk) => {
+                        let buffer = playback_buffer_from_tts(&chunk.audio)
+                            .map_err(|err| err.to_string())?;
+                        playback.push(buffer, chunk.sequence);
                     }
-                }),
-            )
-            .await;
+                    TtsSynthesisEvent::End(_) => {
+                        playback.mark_finished();
+                    }
+                    _ => {}
+                }
+            }
+
+            if stream_result.is_none()
+                && synth_task
+                    .as_ref()
+                    .map(|task| task.is_finished())
+                    .unwrap_or(false)
+            {
+                let task = synth_task.take().expect("checked task exists");
+                stream_result = Some(match task.await {
+                    Ok(result) => result,
+                    Err(err) => Err(TtsError::Other(err.to_string())),
+                });
+                playback.mark_finished();
+            }
+
+            let output_queued_sec = self
+                .inner
+                .lock()
+                .output
+                .as_ref()
+                .map(|output| output.queued_duration().as_secs_f64())
+                .unwrap_or(0.0);
+            playback.update_for_output(output_queued_sec);
+            if playback.should_flush_pending() {
+                while let Some(chunk) = playback.pop_pending() {
+                    if first_audio_at.is_none() {
+                        first_audio_at = Some(Instant::now());
+                    }
+                    if let Some(output) = self.inner.lock().output.as_ref() {
+                        output.enqueue(chunk.buffer);
+                    }
+                    playback.latest_sequence = Some(chunk.sequence);
+                }
+            }
+
+            let output_queued_sec = self
+                .inner
+                .lock()
+                .output
+                .as_ref()
+                .map(|output| output.queued_duration().as_secs_f64())
+                .unwrap_or(0.0);
+            playback.finish_if_drained(output_queued_sec);
+            let playback_position_sec = first_audio_at
+                .map(|started| {
+                    (started.elapsed().as_secs_f64()
+                        - playback.pending_duration_sec
+                        - output_queued_sec)
+                        .max(0.0)
+                })
+                .unwrap_or(0.0);
+            if last_event_at.elapsed() >= Duration::from_millis(100)
+                || playback.latest_sequence.is_some()
+                || matches!(playback.state, DebugTtsPlaybackState::Ended)
+            {
+                let kind = if matches!(playback.state, DebugTtsPlaybackState::Ended) {
+                    DebugTtsStreamEventKind::End
+                } else {
+                    DebugTtsStreamEventKind::Chunk
+                };
+                let mut event = DebugTtsStreamEvent::progress(
+                    run_id.clone(),
+                    kind,
+                    playback.state.as_event_state(),
+                    playback.total_audio_duration_sec,
+                    playback_position_sec,
+                    playback.pending_duration_sec,
+                    output_queued_sec,
+                );
+                if let Some(sequence) = playback.latest_sequence.take() {
+                    event = event.with_sequence(sequence);
+                }
+                emit_debug_tts_stream_event(&app, event);
+                last_event_at = Instant::now();
+            }
+
+            if matches!(playback.state, DebugTtsPlaybackState::Ended) {
+                break;
+            }
+
+            sleep(Duration::from_millis(20)).await;
+        }
+
+        if stream_result.is_none() {
+            if let Some(task) = synth_task.take() {
+                stream_result = Some(match task.await {
+                    Ok(result) => result,
+                    Err(err) => Err(TtsError::Other(err.to_string())),
+                });
+            }
+        }
+
         match stream_result {
-            Ok(result) => {
+            Some(Ok(result)) => {
                 let mut inner = self.inner.lock();
                 inner.latest_result = Some(result);
                 inner.snapshot.has_buffered_audio = true;
             }
-            Err(err) => {
+            Some(Err(err)) => {
                 let message = err.to_string();
                 self.set_state(Some(&app), TtsState::Failed, Some(message.clone()));
                 emit_debug_tts_stream_event(
@@ -693,37 +979,17 @@ impl TtsRuntime {
                 );
                 return Err(message);
             }
-        }
-
-        if self.debug_stream_cancelled(playback_epoch) {
-            self.set_state(Some(&app), TtsState::Idle, None);
-            return Ok(DebugTtsStreamResult {
-                run_id,
-                status: self.status(),
-            });
-        }
-
-        let queued_duration_sec = *queued_duration.lock();
-        let playback_deadline =
-            Instant::now() + Duration::from_secs_f64(queued_duration_sec.max(0.0));
-        while Instant::now() < playback_deadline {
-            if self.debug_stream_cancelled(playback_epoch) {
-                break;
+            None if self.debug_stream_cancelled(playback_epoch) => {}
+            None => {
+                let message = "Streaming TTS ended without a synthesis result".to_string();
+                self.set_state(Some(&app), TtsState::Failed, Some(message.clone()));
+                emit_debug_tts_stream_event(
+                    &app,
+                    DebugTtsStreamEvent::new(run_id.clone(), DebugTtsStreamEventKind::Error)
+                        .with_error(message.clone()),
+                );
+                return Err(message);
             }
-            let elapsed = first_audio_at
-                .lock()
-                .map(|instant| instant.elapsed().as_secs_f64())
-                .unwrap_or(0.0);
-            emit_debug_tts_stream_event(
-                &app,
-                DebugTtsStreamEvent::progress(
-                    run_id.clone(),
-                    DebugTtsStreamEventKind::Chunk,
-                    queued_duration_sec,
-                    elapsed,
-                ),
-            );
-            sleep(Duration::from_millis(100)).await;
         }
 
         {
@@ -737,8 +1003,11 @@ impl TtsRuntime {
             DebugTtsStreamEvent::progress(
                 run_id.clone(),
                 DebugTtsStreamEventKind::End,
-                queued_duration_sec,
-                queued_duration_sec,
+                DebugTtsBufferState::Ended,
+                playback.total_audio_duration_sec,
+                playback.total_audio_duration_sec,
+                0.0,
+                0.0,
             ),
         );
         self.set_state(Some(&app), TtsState::Idle, None);

@@ -19,6 +19,9 @@ const defaultTtsInput = {
   audioTopP: "",
   audioTopK: "",
   audioRepetitionPenalty: "",
+  playbackInitialBufferMs: "",
+  playbackRebufferThresholdMs: "",
+  playbackRebufferTargetMs: "",
 };
 
 describe("buildTtsInvokeConfig", () => {
@@ -58,6 +61,9 @@ describe("buildTtsInvokeConfig", () => {
         audioTopP: "0.85",
         audioTopK: "20",
         audioRepetitionPenalty: "1.15",
+        playbackInitialBufferMs: "",
+        playbackRebufferThresholdMs: "",
+        playbackRebufferTargetMs: "",
       }),
     ).toEqual({
       voice: "Ava",
@@ -73,6 +79,24 @@ describe("buildTtsInvokeConfig", () => {
         audioTopK: 20,
         audioRepetitionPenalty: 1.15,
       },
+    });
+  });
+
+  it("maps streaming playback buffer controls", () => {
+    expect(
+      buildTtsInvokeConfig({
+        ...defaultTtsInput,
+        playbackInitialBufferMs: "600",
+        playbackRebufferThresholdMs: "250",
+        playbackRebufferTargetMs: "600",
+      }),
+    ).toEqual({
+      stream: {
+        playbackInitialBufferMs: 600,
+        playbackRebufferThresholdMs: 250,
+        playbackRebufferTargetMs: 600,
+      },
+      moss: { samplingMode: "fixed" },
     });
   });
 

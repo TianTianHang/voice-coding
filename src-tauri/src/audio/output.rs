@@ -43,9 +43,13 @@ impl PlaybackBuffer {
     }
 
     pub fn duration(&self) -> std::time::Duration {
-        let frames = self.samples.len() / PLAYBACK_CHANNELS as usize;
-        std::time::Duration::from_secs_f64(frames as f64 / PLAYBACK_SAMPLE_RATE_HZ as f64)
+        duration_from_sample_count(self.samples.len())
     }
+}
+
+pub fn duration_from_sample_count(samples: usize) -> std::time::Duration {
+    let frames = samples / PLAYBACK_CHANNELS as usize;
+    std::time::Duration::from_secs_f64(frames as f64 / PLAYBACK_SAMPLE_RATE_HZ as f64)
 }
 
 pub fn playback_buffer_from_tts(audio: &AudioBuffer) -> Result<PlaybackBuffer, AudioOutputError> {
@@ -155,6 +159,10 @@ impl AudioOutput {
         queue.extend(buffer.samples().iter().copied());
     }
 
+    pub fn queued_duration(&self) -> std::time::Duration {
+        duration_from_sample_count(self.queue.lock().len())
+    }
+
     pub fn clear(&self) {
         log::debug!("clearing audio output queue");
         self.queue.lock().clear();
@@ -187,5 +195,15 @@ mod tests {
         let buffer = PlaybackBuffer::from_samples(vec![0.0; PLAYBACK_SAMPLE_RATE_HZ as usize * 2]);
 
         assert_eq!(buffer.duration(), std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn duration_from_sample_count_reports_stereo_queue_duration() {
+        assert_eq!(
+            duration_from_sample_count(
+                PLAYBACK_SAMPLE_RATE_HZ as usize * PLAYBACK_CHANNELS as usize / 2
+            ),
+            std::time::Duration::from_millis(500)
+        );
     }
 }

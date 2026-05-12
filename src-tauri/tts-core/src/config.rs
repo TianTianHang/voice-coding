@@ -16,6 +16,12 @@ pub struct TtsStreamConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio_chunk_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_initial_buffer_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_rebuffer_threshold_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playback_rebuffer_target_ms: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub full_decode_preview: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_text_chunk_chars: Option<usize>,
@@ -23,6 +29,46 @@ pub struct TtsStreamConfig {
     pub flush_on_punctuation: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_buffered_text_chars: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackBufferConfig {
+    pub initial_buffer_ms: u32,
+    pub rebuffer_threshold_ms: u32,
+    pub rebuffer_target_ms: u32,
+}
+
+impl Default for PlaybackBufferConfig {
+    fn default() -> Self {
+        Self {
+            initial_buffer_ms: 600,
+            rebuffer_threshold_ms: 250,
+            rebuffer_target_ms: 600,
+        }
+    }
+}
+
+impl PlaybackBufferConfig {
+    pub fn from_stream_config(config: Option<&TtsStreamConfig>) -> Self {
+        let defaults = Self::default();
+        let Some(config) = config else {
+            return defaults;
+        };
+        let initial_buffer_ms = config
+            .playback_initial_buffer_ms
+            .unwrap_or(defaults.initial_buffer_ms);
+        let rebuffer_threshold_ms = config
+            .playback_rebuffer_threshold_ms
+            .unwrap_or(defaults.rebuffer_threshold_ms);
+        let requested_target = config
+            .playback_rebuffer_target_ms
+            .unwrap_or(initial_buffer_ms);
+        Self {
+            initial_buffer_ms,
+            rebuffer_threshold_ms,
+            rebuffer_target_ms: requested_target.max(rebuffer_threshold_ms),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -59,6 +105,37 @@ mod tests {
     #[test]
     fn tts_config_defaults_to_no_stream_config() {
         assert!(TtsConfig::default().stream.is_none());
+    }
+
+    #[test]
+    fn playback_buffer_config_uses_debug_stream_defaults() {
+        assert_eq!(
+            PlaybackBufferConfig::from_stream_config(None),
+            PlaybackBufferConfig {
+                initial_buffer_ms: 600,
+                rebuffer_threshold_ms: 250,
+                rebuffer_target_ms: 600,
+            }
+        );
+    }
+
+    #[test]
+    fn playback_buffer_config_normalizes_target_to_threshold() {
+        let stream = TtsStreamConfig {
+            playback_initial_buffer_ms: Some(300),
+            playback_rebuffer_threshold_ms: Some(700),
+            playback_rebuffer_target_ms: Some(400),
+            ..TtsStreamConfig::default()
+        };
+
+        assert_eq!(
+            PlaybackBufferConfig::from_stream_config(Some(&stream)),
+            PlaybackBufferConfig {
+                initial_buffer_ms: 300,
+                rebuffer_threshold_ms: 700,
+                rebuffer_target_ms: 700,
+            }
+        );
     }
 
     #[test]

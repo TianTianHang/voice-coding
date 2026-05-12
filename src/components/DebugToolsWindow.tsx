@@ -15,6 +15,11 @@ type MossSamplingMode = "fixed" | "greedy";
 
 export type TtsInvokeConfig = {
   voice?: string;
+  stream?: {
+    playbackInitialBufferMs?: number;
+    playbackRebufferThresholdMs?: number;
+    playbackRebufferTargetMs?: number;
+  };
   moss?: {
     samplingMode?: MossSamplingMode;
     referenceAudioPath?: string;
@@ -43,6 +48,9 @@ export type TtsDebugConfigInput = {
   audioTopP: string;
   audioTopK: string;
   audioRepetitionPenalty: string;
+  playbackInitialBufferMs: string;
+  playbackRebufferThresholdMs: string;
+  playbackRebufferTargetMs: string;
 };
 
 type AsrDebugSourceKind = "url" | "file";
@@ -69,8 +77,11 @@ type DebugStreamingAsrResult = {
 type DebugTtsStreamEvent = {
   runId: string;
   kind: "started" | "chunk" | "end" | "error";
+  bufferState?: "initialBuffering" | "playing" | "rebuffering" | "draining" | "ended";
   queuedDurationSec: number;
   playbackPositionSec: number;
+  pendingDurationSec?: number;
+  outputQueuedDurationSec?: number;
   progress: number;
   sequence?: number | null;
   error?: string | null;
@@ -104,9 +115,29 @@ export function buildTtsInvokeConfig(input: TtsDebugConfigInput): TtsInvokeConfi
   const audioTopP = optionalFiniteNumber(input.audioTopP);
   const audioTopK = optionalNonNegativeInteger(input.audioTopK);
   const audioRepetitionPenalty = optionalFiniteNumber(input.audioRepetitionPenalty);
+  const playbackInitialBufferMs = optionalNonNegativeInteger(input.playbackInitialBufferMs);
+  const playbackRebufferThresholdMs = optionalNonNegativeInteger(input.playbackRebufferThresholdMs);
+  const playbackRebufferTargetMs = optionalNonNegativeInteger(input.playbackRebufferTargetMs);
 
   return {
     ...(voice ? { voice } : {}),
+    ...(playbackInitialBufferMs !== undefined ||
+    playbackRebufferThresholdMs !== undefined ||
+    playbackRebufferTargetMs !== undefined
+      ? {
+          stream: {
+            ...(playbackInitialBufferMs !== undefined
+              ? { playbackInitialBufferMs }
+              : {}),
+            ...(playbackRebufferThresholdMs !== undefined
+              ? { playbackRebufferThresholdMs }
+              : {}),
+            ...(playbackRebufferTargetMs !== undefined
+              ? { playbackRebufferTargetMs }
+              : {}),
+          },
+        }
+      : {}),
     moss: {
       samplingMode: input.samplingMode,
       ...(path ? { referenceAudioPath: path } : {}),
@@ -219,6 +250,12 @@ export function DebugToolsWindow() {
   const [ttsAudioTopK, setTtsAudioTopK] = useState("");
   const [ttsAudioRepetitionPenalty, setTtsAudioRepetitionPenalty] =
     useState("");
+  const [ttsPlaybackInitialBufferMs, setTtsPlaybackInitialBufferMs] =
+    useState("600");
+  const [ttsPlaybackRebufferThresholdMs, setTtsPlaybackRebufferThresholdMs] =
+    useState("250");
+  const [ttsPlaybackRebufferTargetMs, setTtsPlaybackRebufferTargetMs] =
+    useState("600");
   const [ttsStatus, setTtsStatus] = useState<TtsStatusSnapshot | null>(null);
   const [autoTtsStatus, setAutoTtsStatus] =
     useState<AutoTtsStatusSnapshot | null>(null);
@@ -458,6 +495,9 @@ export function DebugToolsWindow() {
           audioTopP: ttsAudioTopP,
           audioTopK: ttsAudioTopK,
           audioRepetitionPenalty: ttsAudioRepetitionPenalty,
+          playbackInitialBufferMs: ttsPlaybackInitialBufferMs,
+          playbackRebufferThresholdMs: ttsPlaybackRebufferThresholdMs,
+          playbackRebufferTargetMs: ttsPlaybackRebufferTargetMs,
         }),
       });
       setTtsStatus(status);
@@ -490,6 +530,9 @@ export function DebugToolsWindow() {
       audioTopP: ttsAudioTopP,
       audioTopK: ttsAudioTopK,
       audioRepetitionPenalty: ttsAudioRepetitionPenalty,
+      playbackInitialBufferMs: ttsPlaybackInitialBufferMs,
+      playbackRebufferThresholdMs: ttsPlaybackRebufferThresholdMs,
+      playbackRebufferTargetMs: ttsPlaybackRebufferTargetMs,
     });
   }
 
@@ -1039,6 +1082,49 @@ export function DebugToolsWindow() {
               repetition penalty are sent for debugging but remain baked into
               the current fixed ONNX graph.
             </p>
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsPlaybackInitialBufferMs}
+                onChange={(event) =>
+                  setTtsPlaybackInitialBufferMs(event.target.value)
+                }
+                placeholder="Initial buffer 600ms"
+                aria-label="TTS playback initial buffer milliseconds"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsPlaybackRebufferThresholdMs}
+                onChange={(event) =>
+                  setTtsPlaybackRebufferThresholdMs(event.target.value)
+                }
+                placeholder="Low water 250ms"
+                aria-label="TTS playback rebuffer threshold milliseconds"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsPlaybackRebufferTargetMs}
+                onChange={(event) =>
+                  setTtsPlaybackRebufferTargetMs(event.target.value)
+                }
+                placeholder="Rebuffer target 600ms"
+                aria-label="TTS playback rebuffer target milliseconds"
+              />
+            </div>
+            <button
+              className="min-h-10 cursor-pointer rounded-lg border border-slate-950 bg-slate-950 px-3 text-sm font-extrabold text-white transition-colors duration-200 hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={streamTts}
+              disabled={isSynthesizingTts || isPlayingTts || isStreamingTts}
+              type="button"
+            >
+              {isStreamingTts ? "Streaming..." : "Generate & Play"}
+            </button>
             <div className="grid grid-cols-2 gap-2">
               <button
                 className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1046,7 +1132,7 @@ export function DebugToolsWindow() {
                 disabled={isSynthesizingTts || isPlayingTts || isStreamingTts}
                 type="button"
               >
-                {isSynthesizingTts ? "Generating..." : "Generate"}
+                {isSynthesizingTts ? "Generating..." : "Generate Buffer"}
               </button>
               <button
                 className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1062,14 +1148,6 @@ export function DebugToolsWindow() {
                 {isPlayingTts ? "Playing..." : "Play"}
               </button>
             </div>
-            <button
-              className="min-h-10 cursor-pointer rounded-lg border border-slate-950 bg-slate-950 px-3 text-sm font-extrabold text-white transition-colors duration-200 hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={streamTts}
-              disabled={isSynthesizingTts || isPlayingTts || isStreamingTts}
-              type="button"
-            >
-              {isStreamingTts ? "Streaming..." : "Stream Play"}
-            </button>
             {(isStreamingTts || ttsStreamEvent) && (
               <div className="grid gap-1 rounded-lg border border-slate-200 bg-white p-3">
                 <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold uppercase text-slate-500">
@@ -1096,6 +1174,12 @@ export function DebugToolsWindow() {
                 <p className="text-xs text-slate-600">
                   {formatTtsDebugTime(ttsStreamEvent?.playbackPositionSec)} /{" "}
                   {formatTtsDebugTime(ttsStreamEvent?.queuedDurationSec)}
+                  {ttsStreamEvent?.bufferState
+                    ? ` · ${ttsStreamEvent.bufferState}`
+                    : ""}
+                  {ttsStreamEvent
+                    ? ` · pending ${formatTtsDebugTime(ttsStreamEvent.pendingDurationSec)} · output ${formatTtsDebugTime(ttsStreamEvent.outputQueuedDurationSec)}`
+                    : ""}
                   {ttsStreamEvent?.sequence
                     ? ` · chunk ${ttsStreamEvent.sequence}`
                     : ""}
