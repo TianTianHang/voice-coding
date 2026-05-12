@@ -3,20 +3,96 @@ import {
   buildDebugStreamingAsrRequest,
   buildTtsInvokeConfig,
   formatAsrDebugTime,
+  formatTtsDebugTime,
 } from "./DebugToolsWindow";
+
+const defaultTtsInput = {
+  voice: "",
+  samplingMode: "fixed" as const,
+  referenceAudioPath: "",
+  seed: "",
+  maxNewFrames: "",
+  textTemperature: "",
+  textTopP: "",
+  textTopK: "",
+  audioTemperature: "",
+  audioTopP: "",
+  audioTopK: "",
+  audioRepetitionPenalty: "",
+};
 
 describe("buildTtsInvokeConfig", () => {
   it("maps the default debug selection to fixed MOSS sampling", () => {
-    expect(buildTtsInvokeConfig("fixed", "")).toEqual({
+    expect(buildTtsInvokeConfig(defaultTtsInput)).toEqual({
       moss: { samplingMode: "fixed" },
     });
   });
 
   it("maps greedy sampling and trims the reference audio path", () => {
-    expect(buildTtsInvokeConfig("greedy", "  /tmp/ref.wav  ")).toEqual({
+    expect(
+      buildTtsInvokeConfig({
+        ...defaultTtsInput,
+        samplingMode: "greedy",
+        referenceAudioPath: "  /tmp/ref.wav  ",
+      }),
+    ).toEqual({
       moss: {
         samplingMode: "greedy",
         referenceAudioPath: "/tmp/ref.wav",
+      },
+    });
+  });
+
+  it("maps MOSS private debug parameters", () => {
+    expect(
+      buildTtsInvokeConfig({
+        voice: " Ava ",
+        samplingMode: "fixed",
+        referenceAudioPath: "",
+        seed: "42",
+        maxNewFrames: "128",
+        textTemperature: "1.1",
+        textTopP: "0.9",
+        textTopK: "40",
+        audioTemperature: "0.7",
+        audioTopP: "0.85",
+        audioTopK: "20",
+        audioRepetitionPenalty: "1.15",
+      }),
+    ).toEqual({
+      voice: "Ava",
+      moss: {
+        samplingMode: "fixed",
+        seed: 42,
+        maxNewFrames: 128,
+        textTemperature: 1.1,
+        textTopP: 0.9,
+        textTopK: 40,
+        audioTemperature: 0.7,
+        audioTopP: 0.85,
+        audioTopK: 20,
+        audioRepetitionPenalty: 1.15,
+      },
+    });
+  });
+
+  it("omits invalid numeric fields and floors non-negative integers", () => {
+    expect(
+      buildTtsInvokeConfig({
+        ...defaultTtsInput,
+        seed: "-1.2",
+        maxNewFrames: "12.9",
+        textTemperature: "NaN",
+        textTopK: "5.8",
+        audioTopP: "Infinity",
+        audioTopK: "bad",
+      }),
+    ).toEqual({
+      moss: {
+        samplingMode: "fixed",
+        seed: 0,
+        maxNewFrames: 12,
+        textTopK: 5,
       },
     });
   });
@@ -76,5 +152,12 @@ describe("formatAsrDebugTime", () => {
   it("formats missing seconds", () => {
     expect(formatAsrDebugTime(null)).toBe("--");
     expect(formatAsrDebugTime(undefined)).toBe("--");
+  });
+});
+
+describe("formatTtsDebugTime", () => {
+  it("uses the same compact seconds display as streaming ASR", () => {
+    expect(formatTtsDebugTime(2.345)).toBe("2.35s");
+    expect(formatTtsDebugTime(undefined)).toBe("--");
   });
 });

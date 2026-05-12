@@ -10,6 +10,7 @@ struct PreparedSynthesis {
     prompt_audio_codes: Vec<Vec<i64>>,
     chunks: Vec<PreparedTextChunk>,
     sampling_mode: MossSamplingMode,
+    generation_config: MossGenerationConfig,
     reference_audio: Option<ReferenceAudio>,
 }
 
@@ -124,6 +125,7 @@ impl TtsEngine for MossOnnxTtsEngine {
             prompt_audio_codes: voice.prompt_audio_codes.clone(),
             chunks,
             sampling_mode,
+            generation_config: MossGenerationConfig::from_tts_config(&config),
             reference_audio,
         };
         let sessions = Arc::clone(&self.sessions);
@@ -144,22 +146,42 @@ impl TtsEngine for MossOnnxTtsEngine {
         text: &str,
         config: TtsConfig,
     ) -> tts_core::Result<Vec<TtsSynthesisEvent>> {
+        let mut events = Vec::new();
+        self.synthesize_stream_events(text, config, Box::new(|event| events.push(event)))
+            .await?;
+        Ok(events)
+    }
+
+    async fn synthesize_stream_events(
+        &self,
+        text: &str,
+        config: TtsConfig,
+        mut on_event: Box<dyn FnMut(TtsSynthesisEvent) + Send + 'async_trait>,
+    ) -> tts_core::Result<TtsResult> {
         let mut session = self.start_stream(config).await?;
         session
             .push_text(StreamingTextChunk::final_chunk(text))
             .await?;
+        let mut emitted_end = false;
+        loop {
+            match session.next_event().await? {
+                Some(event) => {
+                    emitted_end |= matches!(event, TtsSynthesisEvent::End(_));
+                    on_event(event);
+                    if emitted_end {
+                        break;
+                    }
+                }
+                None => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+            }
+        }
         let result = session.finish().await?;
-        let mut events = Vec::new();
-        while let Some(event) = session.next_event().await? {
-            events.push(event);
+        if !emitted_end {
+            on_event(TtsSynthesisEvent::End(result.clone()));
         }
-        if !events
-            .iter()
-            .any(|event| matches!(event, TtsSynthesisEvent::End(_)))
-        {
-            events.push(TtsSynthesisEvent::End(result));
-        }
-        Ok(events)
+        Ok(result)
     }
 
     async fn health_check(&self) -> tts_core::Result<bool> {
@@ -210,6 +232,7 @@ fn synthesize_prepared_with_sessions(
         &prompt_audio_codes,
         prepared.chunks,
         prepared.sampling_mode,
+        prepared.generation_config,
     )
 }
 
@@ -219,11 +242,12 @@ fn synthesize_chunks(
     prompt_audio_codes: &[Vec<i64>],
     chunks: Vec<PreparedTextChunk>,
     sampling_mode: MossSamplingMode,
+    generation_config: MossGenerationConfig,
 ) -> Result<TtsResult, MossTtsError> {
     let mut results = Vec::with_capacity(chunks.len());
     for chunk in chunks {
         let request = assets.build_voice_clone_request_rows(chunk.token_ids, prompt_audio_codes)?;
-        results.push(sessions.synthesize(assets, request, sampling_mode)?);
+        results.push(sessions.synthesize(assets, request, sampling_mode, generation_config)?);
     }
     concatenate_tts_results(results)
 }

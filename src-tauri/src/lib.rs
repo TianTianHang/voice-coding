@@ -115,6 +115,7 @@ pub fn run() {
             tts::debug_get_tts_status,
             tts::debug_synthesize_tts,
             tts::debug_play_tts,
+            tts::debug_stream_tts,
             tts::debug_cancel_tts_playback,
             tts::debug_get_auto_tts_status,
             tts::debug_set_auto_tts_enabled,

@@ -14,10 +14,35 @@ type VadRuntimeConfig = {
 type MossSamplingMode = "fixed" | "greedy";
 
 export type TtsInvokeConfig = {
+  voice?: string;
   moss?: {
     samplingMode?: MossSamplingMode;
     referenceAudioPath?: string;
+    seed?: number;
+    maxNewFrames?: number;
+    textTemperature?: number;
+    textTopP?: number;
+    textTopK?: number;
+    audioTemperature?: number;
+    audioTopP?: number;
+    audioTopK?: number;
+    audioRepetitionPenalty?: number;
   };
+};
+
+export type TtsDebugConfigInput = {
+  voice: string;
+  samplingMode: MossSamplingMode;
+  referenceAudioPath: string;
+  seed: string;
+  maxNewFrames: string;
+  textTemperature: string;
+  textTopP: string;
+  textTopK: string;
+  audioTemperature: string;
+  audioTopP: string;
+  audioTopK: string;
+  audioRepetitionPenalty: string;
 };
 
 type AsrDebugSourceKind = "url" | "file";
@@ -41,6 +66,21 @@ type DebugStreamingAsrResult = {
   events: DebugStreamingAsrEvent[];
 };
 
+type DebugTtsStreamEvent = {
+  runId: string;
+  kind: "started" | "chunk" | "end" | "error";
+  queuedDurationSec: number;
+  playbackPositionSec: number;
+  progress: number;
+  sequence?: number | null;
+  error?: string | null;
+};
+
+type DebugTtsStreamResult = {
+  runId: string;
+  status: TtsStatusSnapshot;
+};
+
 export type DebugStreamingAsrInvokeRequest = {
   runId: string;
   sourceKind: AsrDebugSourceKind;
@@ -52,15 +92,33 @@ export type DebugStreamingAsrInvokeRequest = {
   unfixedTokenNum?: number;
 };
 
-export function buildTtsInvokeConfig(
-  samplingMode: MossSamplingMode,
-  referenceAudioPath: string,
-): TtsInvokeConfig {
-  const path = referenceAudioPath.trim();
+export function buildTtsInvokeConfig(input: TtsDebugConfigInput): TtsInvokeConfig {
+  const path = input.referenceAudioPath.trim();
+  const voice = input.voice.trim();
+  const seed = optionalNonNegativeInteger(input.seed);
+  const maxNewFrames = optionalNonNegativeInteger(input.maxNewFrames);
+  const textTemperature = optionalFiniteNumber(input.textTemperature);
+  const textTopP = optionalFiniteNumber(input.textTopP);
+  const textTopK = optionalNonNegativeInteger(input.textTopK);
+  const audioTemperature = optionalFiniteNumber(input.audioTemperature);
+  const audioTopP = optionalFiniteNumber(input.audioTopP);
+  const audioTopK = optionalNonNegativeInteger(input.audioTopK);
+  const audioRepetitionPenalty = optionalFiniteNumber(input.audioRepetitionPenalty);
+
   return {
+    ...(voice ? { voice } : {}),
     moss: {
-      samplingMode,
+      samplingMode: input.samplingMode,
       ...(path ? { referenceAudioPath: path } : {}),
+      ...(seed !== undefined ? { seed } : {}),
+      ...(maxNewFrames !== undefined ? { maxNewFrames } : {}),
+      ...(textTemperature !== undefined ? { textTemperature } : {}),
+      ...(textTopP !== undefined ? { textTopP } : {}),
+      ...(textTopK !== undefined ? { textTopK } : {}),
+      ...(audioTemperature !== undefined ? { audioTemperature } : {}),
+      ...(audioTopP !== undefined ? { audioTopP } : {}),
+      ...(audioTopK !== undefined ? { audioTopK } : {}),
+      ...(audioRepetitionPenalty !== undefined ? { audioRepetitionPenalty } : {}),
     },
   };
 }
@@ -110,11 +168,19 @@ export function createDebugAsrRunId(now = Date.now()): string {
   return `asr-debug-${now}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export function createDebugTtsRunId(now = Date.now()): string {
+  return `tts-debug-${now}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export function formatAsrDebugTime(seconds?: number | null): string {
   if (seconds === undefined || seconds === null || !Number.isFinite(seconds)) {
     return "--";
   }
   return `${seconds.toFixed(2)}s`;
+}
+
+export function formatTtsDebugTime(seconds?: number | null): string {
+  return formatAsrDebugTime(seconds);
 }
 
 function optionalFiniteNumber(value: string): number | undefined {
@@ -139,15 +205,33 @@ export function DebugToolsWindow() {
   const [vadConfigMessage, setVadConfigMessage] = useState<string | null>(null);
   const [isSavingVadConfig, setIsSavingVadConfig] = useState(false);
   const [ttsText, setTtsText] = useState("你好。");
+  const [ttsVoice, setTtsVoice] = useState("");
   const [ttsSamplingMode, setTtsSamplingMode] =
     useState<MossSamplingMode>("fixed");
   const [ttsReferenceAudioPath, setTtsReferenceAudioPath] = useState("");
+  const [ttsSeed, setTtsSeed] = useState("");
+  const [ttsMaxNewFrames, setTtsMaxNewFrames] = useState("");
+  const [ttsTextTemperature, setTtsTextTemperature] = useState("");
+  const [ttsTextTopP, setTtsTextTopP] = useState("");
+  const [ttsTextTopK, setTtsTextTopK] = useState("");
+  const [ttsAudioTemperature, setTtsAudioTemperature] = useState("");
+  const [ttsAudioTopP, setTtsAudioTopP] = useState("");
+  const [ttsAudioTopK, setTtsAudioTopK] = useState("");
+  const [ttsAudioRepetitionPenalty, setTtsAudioRepetitionPenalty] =
+    useState("");
   const [ttsStatus, setTtsStatus] = useState<TtsStatusSnapshot | null>(null);
   const [autoTtsStatus, setAutoTtsStatus] =
     useState<AutoTtsStatusSnapshot | null>(null);
   const [ttsMessage, setTtsMessage] = useState<string | null>(null);
   const [isSynthesizingTts, setIsSynthesizingTts] = useState(false);
   const [isPlayingTts, setIsPlayingTts] = useState(false);
+  const [isStreamingTts, setIsStreamingTts] = useState(false);
+  const [ttsStreamEvent, setTtsStreamEvent] =
+    useState<DebugTtsStreamEvent | null>(null);
+  const [ttsStreamEvents, setTtsStreamEvents] = useState<DebugTtsStreamEvent[]>(
+    [],
+  );
+  const activeTtsRunIdRef = useRef<string | null>(null);
   const [isUpdatingAutoTts, setIsUpdatingAutoTts] = useState(false);
   const [asrSourceKind, setAsrSourceKind] =
     useState<AsrDebugSourceKind>("file");
@@ -277,6 +361,39 @@ export function DebugToolsWindow() {
   useEffect(() => {
     let unlisten: (() => void) | null = null;
 
+    async function setupDebugTtsEvents() {
+      unlisten = await listen<DebugTtsStreamEvent>("debug-tts-stream", (event) => {
+        const payload = event.payload;
+        if (activeTtsRunIdRef.current !== payload.runId) {
+          return;
+        }
+
+        setTtsStreamEvent(payload);
+        setTtsStreamEvents((current) => [...current, payload]);
+        if (payload.kind === "started") {
+          setTtsMessage("Streaming TTS started.");
+        } else if (payload.kind === "end") {
+          setTtsMessage("Streaming playback finished.");
+        } else if (payload.kind === "error") {
+          setTtsMessage(payload.error || "Streaming TTS failed.");
+        } else {
+          setTtsMessage(
+            `Streaming playback ${Math.round(payload.progress * 100)}%.`,
+          );
+        }
+      });
+    }
+
+    void setupDebugTtsEvents();
+
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+
     async function setupAutoTtsEvents() {
       unlisten = await listen<AutoTtsStatusSnapshot>("auto-tts-state", (event) => {
         setAutoTtsStatus(event.payload);
@@ -328,7 +445,20 @@ export function DebugToolsWindow() {
     try {
       const status = await invoke<TtsStatusSnapshot>("debug_synthesize_tts", {
         text,
-        config: buildTtsInvokeConfig(ttsSamplingMode, ttsReferenceAudioPath),
+        config: buildTtsInvokeConfig({
+          voice: ttsVoice,
+          samplingMode: ttsSamplingMode,
+          referenceAudioPath: ttsReferenceAudioPath,
+          seed: ttsSeed,
+          maxNewFrames: ttsMaxNewFrames,
+          textTemperature: ttsTextTemperature,
+          textTopP: ttsTextTopP,
+          textTopK: ttsTextTopK,
+          audioTemperature: ttsAudioTemperature,
+          audioTopP: ttsAudioTopP,
+          audioTopK: ttsAudioTopK,
+          audioRepetitionPenalty: ttsAudioRepetitionPenalty,
+        }),
       });
       setTtsStatus(status);
       setTtsMessage(
@@ -343,6 +473,61 @@ export function DebugToolsWindow() {
       );
     } finally {
       setIsSynthesizingTts(false);
+    }
+  }
+
+  function currentTtsInvokeConfig(): TtsInvokeConfig {
+    return buildTtsInvokeConfig({
+      voice: ttsVoice,
+      samplingMode: ttsSamplingMode,
+      referenceAudioPath: ttsReferenceAudioPath,
+      seed: ttsSeed,
+      maxNewFrames: ttsMaxNewFrames,
+      textTemperature: ttsTextTemperature,
+      textTopP: ttsTextTopP,
+      textTopK: ttsTextTopK,
+      audioTemperature: ttsAudioTemperature,
+      audioTopP: ttsAudioTopP,
+      audioTopK: ttsAudioTopK,
+      audioRepetitionPenalty: ttsAudioRepetitionPenalty,
+    });
+  }
+
+  async function streamTts() {
+    const text = ttsText.trim();
+    if (!text) {
+      setTtsMessage("TTS text must not be empty.");
+      return;
+    }
+
+    const runId = createDebugTtsRunId();
+    activeTtsRunIdRef.current = runId;
+    setIsStreamingTts(true);
+    setIsPlayingTts(true);
+    setTtsStreamEvent(null);
+    setTtsStreamEvents([]);
+    setTtsMessage(null);
+    try {
+      const result = await invoke<DebugTtsStreamResult>("debug_stream_tts", {
+        runId,
+        text,
+        config: currentTtsInvokeConfig(),
+      });
+      if (result.runId === runId) {
+        setTtsStatus(result.status);
+        setTtsMessage("Streaming playback finished.");
+      }
+    } catch (error) {
+      setTtsMessage(String(error));
+      setTtsStatus((current) =>
+        current ? { ...current, state: "failed", error: String(error) } : null,
+      );
+    } finally {
+      if (activeTtsRunIdRef.current === runId) {
+        activeTtsRunIdRef.current = null;
+      }
+      setIsStreamingTts(false);
+      setIsPlayingTts(false);
     }
   }
 
@@ -368,6 +553,9 @@ export function DebugToolsWindow() {
     try {
       const status = await invoke<TtsStatusSnapshot>("debug_cancel_tts_playback");
       setTtsStatus(status);
+      activeTtsRunIdRef.current = null;
+      setIsStreamingTts(false);
+      setIsPlayingTts(false);
       setTtsMessage("Playback cancelled.");
     } catch (error) {
       setTtsMessage(String(error));
@@ -726,6 +914,14 @@ export function DebugToolsWindow() {
               onChange={(event) => setTtsText(event.target.value)}
               placeholder="Text to synthesize"
             />
+            <input
+              className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+              type="text"
+              value={ttsVoice}
+              onChange={(event) => setTtsVoice(event.target.value)}
+              placeholder="Voice name (default Junhao)"
+              aria-label="MOSS voice"
+            />
             <div className="grid grid-cols-[minmax(0,0.75fr)_minmax(0,1.25fr)] gap-2">
               <select
                 className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
@@ -750,10 +946,104 @@ export function DebugToolsWindow() {
               />
             </div>
             <div className="grid grid-cols-2 gap-2">
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsSeed}
+                onChange={(event) => setTtsSeed(event.target.value)}
+                placeholder="Seed"
+                aria-label="MOSS seed"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsMaxNewFrames}
+                onChange={(event) => setTtsMaxNewFrames(event.target.value)}
+                placeholder="Max frames (375)"
+                aria-label="MOSS max new frames"
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                step="0.01"
+                value={ttsTextTemperature}
+                onChange={(event) => setTtsTextTemperature(event.target.value)}
+                placeholder="Text temp 1.0"
+                aria-label="MOSS text temperature"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                step="0.01"
+                value={ttsTextTopP}
+                onChange={(event) => setTtsTextTopP(event.target.value)}
+                placeholder="Text top-p 1.0"
+                aria-label="MOSS text top p"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsTextTopK}
+                onChange={(event) => setTtsTextTopK(event.target.value)}
+                placeholder="Text top-k 50"
+                aria-label="MOSS text top k"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                step="0.01"
+                value={ttsAudioTemperature}
+                onChange={(event) => setTtsAudioTemperature(event.target.value)}
+                placeholder="Audio temp 0.8"
+                aria-label="MOSS audio temperature"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                step="0.01"
+                value={ttsAudioTopP}
+                onChange={(event) => setTtsAudioTopP(event.target.value)}
+                placeholder="Audio top-p 0.95"
+                aria-label="MOSS audio top p"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                min="0"
+                value={ttsAudioTopK}
+                onChange={(event) => setTtsAudioTopK(event.target.value)}
+                placeholder="Audio top-k 25"
+                aria-label="MOSS audio top k"
+              />
+              <input
+                className="min-h-10 rounded-lg border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900"
+                type="number"
+                step="0.01"
+                value={ttsAudioRepetitionPenalty}
+                onChange={(event) =>
+                  setTtsAudioRepetitionPenalty(event.target.value)
+                }
+                placeholder="Repeat penalty 1.2"
+                aria-label="MOSS audio repetition penalty"
+              />
+            </div>
+            <p className="text-xs font-semibold text-slate-600">
+              Seed and max frames are active. Temperature, top-p, top-k, and
+              repetition penalty are sent for debugging but remain baked into
+              the current fixed ONNX graph.
+            </p>
+            <div className="grid grid-cols-2 gap-2">
               <button
                 className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
                 onClick={synthesizeTts}
-                disabled={isSynthesizingTts || isPlayingTts}
+                disabled={isSynthesizingTts || isPlayingTts || isStreamingTts}
                 type="button"
               >
                 {isSynthesizingTts ? "Generating..." : "Generate"}
@@ -762,13 +1052,59 @@ export function DebugToolsWindow() {
                 className="min-h-10 cursor-pointer rounded-lg border border-slate-300 bg-white px-3 text-sm font-extrabold text-slate-800 transition-colors duration-200 hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
                 onClick={playTts}
                 disabled={
-                  isSynthesizingTts || isPlayingTts || !ttsStatus?.hasBufferedAudio
+                  isSynthesizingTts ||
+                  isPlayingTts ||
+                  isStreamingTts ||
+                  !ttsStatus?.hasBufferedAudio
                 }
                 type="button"
               >
                 {isPlayingTts ? "Playing..." : "Play"}
               </button>
             </div>
+            <button
+              className="min-h-10 cursor-pointer rounded-lg border border-slate-950 bg-slate-950 px-3 text-sm font-extrabold text-white transition-colors duration-200 hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-900 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={streamTts}
+              disabled={isSynthesizingTts || isPlayingTts || isStreamingTts}
+              type="button"
+            >
+              {isStreamingTts ? "Streaming..." : "Stream Play"}
+            </button>
+            {(isStreamingTts || ttsStreamEvent) && (
+              <div className="grid gap-1 rounded-lg border border-slate-200 bg-white p-3">
+                <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold uppercase text-slate-500">
+                  <span>Streaming Playback</span>
+                  <span>
+                    {Math.round((ttsStreamEvent?.progress ?? 0) * 100)}%
+                  </span>
+                </div>
+                <div
+                  className="h-2 overflow-hidden rounded-full bg-slate-200"
+                  role="progressbar"
+                  aria-label="TTS streaming playback progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={Math.round((ttsStreamEvent?.progress ?? 0) * 100)}
+                >
+                  <div
+                    className="h-full rounded-full bg-slate-950 transition-[width] duration-150"
+                    style={{
+                      width: `${Math.round((ttsStreamEvent?.progress ?? 0) * 100)}%`,
+                    }}
+                  />
+                </div>
+                <p className="text-xs text-slate-600">
+                  {formatTtsDebugTime(ttsStreamEvent?.playbackPositionSec)} /{" "}
+                  {formatTtsDebugTime(ttsStreamEvent?.queuedDurationSec)}
+                  {ttsStreamEvent?.sequence
+                    ? ` · chunk ${ttsStreamEvent.sequence}`
+                    : ""}
+                  {ttsStreamEvents.length
+                    ? ` · ${ttsStreamEvents.length} events`
+                    : ""}
+                </p>
+              </div>
+            )}
             {isPlayingTts && (
               <button
                 className="min-h-10 cursor-pointer rounded-lg border border-rose-300 bg-rose-50 px-3 text-sm font-extrabold text-rose-800 transition-colors duration-200 hover:bg-rose-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-rose-900"

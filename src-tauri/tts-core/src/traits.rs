@@ -18,6 +18,25 @@ pub trait TtsEngine: Send + Sync {
         ))
     }
 
+    async fn synthesize_stream_events(
+        &self,
+        text: &str,
+        config: TtsConfig,
+        mut on_event: Box<dyn FnMut(TtsSynthesisEvent) + Send + 'async_trait>,
+    ) -> Result<TtsResult> {
+        let events = self.synthesize_stream(text, config).await?;
+        let mut end_result = None;
+        for event in events {
+            if let TtsSynthesisEvent::End(result) = &event {
+                end_result = Some(result.clone());
+            }
+            on_event(event);
+        }
+        end_result.ok_or_else(|| {
+            TtsError::SynthesisError("streaming synthesis did not produce an End event".to_string())
+        })
+    }
+
     async fn health_check(&self) -> Result<bool>;
 }
 

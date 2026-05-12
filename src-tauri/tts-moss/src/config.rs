@@ -8,6 +8,26 @@ pub struct MossModelConfig {
     pub model_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct MossGenerationConfig {
+    seed: Option<u64>,
+    max_new_frames: Option<usize>,
+}
+
+impl MossGenerationConfig {
+    fn from_tts_config(config: &TtsConfig) -> Self {
+        let moss = config.moss.as_ref();
+        Self {
+            seed: moss.and_then(|moss| moss.seed),
+            max_new_frames: moss.and_then(|moss| moss.max_new_frames),
+        }
+    }
+
+    fn frame_limit(self, assets: &MossAssets) -> usize {
+        self.max_new_frames.unwrap_or_else(|| assets.max_new_frames())
+    }
+}
+
 impl MossModelConfig {
     pub fn from_env() -> Self {
         let model_dir = std::env::var("MOSS_TTS_MODEL_DIR")

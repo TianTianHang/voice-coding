@@ -667,6 +667,7 @@ mod tests {
                 token_ids: vec![1, 2, 3],
             }],
             sampling_mode: MossSamplingMode::Fixed,
+            generation_config: MossGenerationConfig::default(),
             reference_audio: None,
         };
 
@@ -674,6 +675,36 @@ mod tests {
             .expect_err("invalid fixture ONNX files must surface as worker init errors");
 
         assert!(err.to_string().contains("session_init"));
+    }
+
+    #[test]
+    fn seeded_simple_rng_is_reproducible() {
+        let mut first = SimpleRng::from_seed(42);
+        let mut second = SimpleRng::from_optional_seed(Some(42));
+
+        let first_values = (0..8).map(|_| first.next_f32()).collect::<Vec<_>>();
+        let second_values = (0..8).map(|_| second.next_f32()).collect::<Vec<_>>();
+
+        assert_eq!(first_values, second_values);
+    }
+
+    #[test]
+    fn generation_config_overrides_frame_limit() {
+        let fixture = MossFixture::new();
+        let assets = MossAssets::load(MossModelConfig {
+            model_dir: fixture.tts_dir,
+        })
+        .unwrap();
+        let explicit = MossGenerationConfig {
+            seed: None,
+            max_new_frames: Some(0),
+        };
+
+        assert_eq!(explicit.frame_limit(&assets), 0);
+        assert_eq!(
+            MossGenerationConfig::default().frame_limit(&assets),
+            assets.max_new_frames()
+        );
     }
 
     fn run_stubbed_stream_session<F>(

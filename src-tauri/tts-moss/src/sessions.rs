@@ -141,8 +141,10 @@ impl MossSessions {
         assets: &MossAssets,
         request: MossRequestRows,
         sampling_mode: MossSamplingMode,
+        generation_config: MossGenerationConfig,
     ) -> Result<TtsResult, MossTtsError> {
-        let generated_frames = self.generate_audio_frames(assets, request, sampling_mode)?;
+        let generated_frames =
+            self.generate_audio_frames(assets, request, sampling_mode, generation_config)?;
         self.decode_generated_frames(generated_frames)
     }
 
@@ -151,6 +153,7 @@ impl MossSessions {
         assets: &MossAssets,
         request: MossRequestRows,
         sampling_mode: MossSamplingMode,
+        generation_config: MossGenerationConfig,
         requested_chunk_ms: Option<u32>,
         mut on_pcm_chunk: F,
     ) -> Result<TtsResult, MossTtsError>
@@ -162,17 +165,23 @@ impl MossSessions {
         let mut budget = FrameBudget::new(state.batch_size, requested_chunk_ms);
         let mut buffer = PcmChunkBuffer::default();
 
-        self.generate_audio_frames_with_callback(assets, request, sampling_mode, |sessions, frame| {
-            pending_frames.push(frame.to_vec());
-            if pending_frames.len() >= budget.next_batch_size(false) {
-                let frames = std::mem::take(&mut pending_frames);
-                let chunk = sessions.run_codec_decode_step_batch(&frames, &mut state)?;
-                budget.record_pcm_samples(chunk.len());
-                buffer.push_chunk(chunk.clone());
-                on_pcm_chunk(chunk, false)?;
-            }
-            Ok(())
-        })?;
+        self.generate_audio_frames_with_callback(
+            assets,
+            request,
+            sampling_mode,
+            generation_config,
+            |sessions, frame| {
+                pending_frames.push(frame.to_vec());
+                if pending_frames.len() >= budget.next_batch_size(false) {
+                    let frames = std::mem::take(&mut pending_frames);
+                    let chunk = sessions.run_codec_decode_step_batch(&frames, &mut state)?;
+                    budget.record_pcm_samples(chunk.len());
+                    buffer.push_chunk(chunk.clone());
+                    on_pcm_chunk(chunk, false)?;
+                }
+                Ok(())
+            },
+        )?;
 
         while !pending_frames.is_empty() {
             let take = budget.next_batch_size(true).min(pending_frames.len());
@@ -299,11 +308,13 @@ impl MossSessions {
         assets: &MossAssets,
         request: MossRequestRows,
         sampling_mode: MossSamplingMode,
+        generation_config: MossGenerationConfig,
     ) -> Result<Vec<Vec<i64>>, MossTtsError> {
         self.generate_audio_frames_with_callback(
             assets,
             request,
             sampling_mode,
+            generation_config,
             |_sessions, _frame| Ok(()),
         )
     }
@@ -313,6 +324,7 @@ impl MossSessions {
         assets: &MossAssets,
         request: MossRequestRows,
         sampling_mode: MossSamplingMode,
+        generation_config: MossGenerationConfig,
         mut on_frame: F,
     ) -> Result<Vec<Vec<i64>>, MossTtsError>
     where
@@ -363,9 +375,10 @@ impl MossSessions {
 
         let mut frames = Vec::new();
         let mut previous_token_sets = vec![vec![false; assets.audio_codebook_size()]; assets.n_vq()];
-        let mut rng = SimpleRng::new();
+        let mut rng = SimpleRng::from_optional_seed(generation_config.seed);
+        let max_new_frames = generation_config.frame_limit(assets);
 
-        for past_valid_length in (initial_past_valid_length..).take(assets.max_new_frames()) {
+        for past_valid_length in (initial_past_valid_length..).take(max_new_frames) {
             let fixed = match sampling_mode {
                 MossSamplingMode::Fixed => {
                     self.run_local_fixed_sampled_frame(
@@ -1113,6 +1126,14 @@ impl SimpleRng {
             .map(|duration| duration.as_nanos() as u64)
             .unwrap_or(0x9e37_79b9_7f4a_7c15);
         Self { state }
+    }
+
+    fn from_seed(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn from_optional_seed(seed: Option<u64>) -> Self {
+        seed.map(Self::from_seed).unwrap_or_else(Self::new)
     }
 
     fn next_f32(&mut self) -> f32 {

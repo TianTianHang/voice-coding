@@ -2,6 +2,7 @@ struct MossStreamPrepared {
     assets: MossAssets,
     prompt_audio_codes: Vec<Vec<i64>>,
     sampling_mode: MossSamplingMode,
+    generation_config: MossGenerationConfig,
     reference_audio: Option<ReferenceAudio>,
     requested_chunk_ms: Option<u32>,
 }
@@ -124,6 +125,7 @@ impl<'a> MossStreamSession<'a> {
             assets: self.engine.assets.clone(),
             prompt_audio_codes: voice.prompt_audio_codes.clone(),
             sampling_mode,
+            generation_config: MossGenerationConfig::from_tts_config(&self.config),
             reference_audio,
             requested_chunk_ms: self
                 .config
@@ -303,6 +305,7 @@ fn synthesize_stream_prepared_with_sessions(
                 &prepared.assets,
                 request,
                 prepared.sampling_mode,
+                prepared.generation_config,
                 prepared.requested_chunk_ms,
                 emit_chunk,
             )

@@ -6,7 +6,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{sleep, Duration};
 #[cfg(any(test, all(feature = "tts-mock", not(feature = "tts-moss-onnx"))))]
 use tts_core::{AudioBuffer, PcmData, PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ};
-use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult};
+use tts_core::{TtsConfig, TtsEngine, TtsError, TtsResult, TtsSynthesisEvent};
 
 use crate::audio::{playback_buffer_from_tts, AudioOutput};
 use crate::model_paths::{
@@ -34,6 +34,86 @@ pub struct TtsStatusSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub has_buffered_audio: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugTtsStreamEvent {
+    pub run_id: String,
+    pub kind: DebugTtsStreamEventKind,
+    pub queued_duration_sec: f64,
+    pub playback_position_sec: f64,
+    pub progress: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum DebugTtsStreamEventKind {
+    Started,
+    Chunk,
+    End,
+    Error,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugTtsStreamResult {
+    pub run_id: String,
+    pub status: TtsStatusSnapshot,
+}
+
+impl DebugTtsStreamEvent {
+    fn new(run_id: String, kind: DebugTtsStreamEventKind) -> Self {
+        Self {
+            run_id,
+            kind,
+            queued_duration_sec: 0.0,
+            playback_position_sec: 0.0,
+            progress: 0.0,
+            sequence: None,
+            error: None,
+        }
+    }
+
+    fn progress(
+        run_id: String,
+        kind: DebugTtsStreamEventKind,
+        queued_duration_sec: f64,
+        playback_position_sec: f64,
+    ) -> Self {
+        let progress = if queued_duration_sec > 0.0 {
+            (playback_position_sec / queued_duration_sec).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        Self {
+            run_id,
+            kind,
+            queued_duration_sec,
+            playback_position_sec,
+            progress,
+            sequence: None,
+            error: None,
+        }
+    }
+
+    fn with_sequence(mut self, sequence: u64) -> Self {
+        self.sequence = Some(sequence);
+        self
+    }
+
+    fn with_error(mut self, error: String) -> Self {
+        self.error = Some(error);
+        self
+    }
+}
+
+fn emit_debug_tts_stream_event(app: &AppHandle, event: DebugTtsStreamEvent) {
+    let _ = app.emit("debug-tts-stream", event);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -509,6 +589,170 @@ impl TtsRuntime {
         Ok(self.status())
     }
 
+    pub async fn stream_play_debug(
+        &self,
+        app: AppHandle,
+        run_id: String,
+        text: String,
+        config: TtsConfig,
+    ) -> Result<DebugTtsStreamResult, String> {
+        if text.trim().is_empty() {
+            return Err("TTS text must not be empty".to_string());
+        }
+
+        {
+            let mut inner = self.inner.lock();
+            Self::stop_playback_locked(&mut inner);
+            inner.cancel_requested = false;
+            inner.latest_result = None;
+        }
+        self.set_state(Some(&app), TtsState::Synthesizing, None);
+
+        let output = match AudioOutput::new() {
+            Ok(output) => output,
+            Err(err) => {
+                let message = err.to_string();
+                self.set_state(Some(&app), TtsState::Failed, Some(message.clone()));
+                emit_debug_tts_stream_event(
+                    &app,
+                    DebugTtsStreamEvent::new(run_id.clone(), DebugTtsStreamEventKind::Error)
+                        .with_error(message.clone()),
+                );
+                return Err(message);
+            }
+        };
+        let playback_epoch = {
+            let mut inner = self.inner.lock();
+            inner.playback_epoch = inner.playback_epoch.wrapping_add(1);
+            inner.output = Some(output);
+            inner.playback_epoch
+        };
+        self.set_state(Some(&app), TtsState::Playing, None);
+        emit_debug_tts_stream_event(
+            &app,
+            DebugTtsStreamEvent::new(run_id.clone(), DebugTtsStreamEventKind::Started),
+        );
+
+        let queued_duration = Arc::new(Mutex::new(0.0f64));
+        let first_audio_at = Arc::new(Mutex::new(None::<Instant>));
+        let output_for_events = Arc::clone(&self.inner);
+        let queued_for_events = Arc::clone(&queued_duration);
+        let first_audio_for_events = Arc::clone(&first_audio_at);
+        let app_for_events = app.clone();
+        let run_id_for_events = run_id.clone();
+        let stream_result = self
+            .engine
+            .synthesize_stream_events(
+                &text,
+                config,
+                Box::new(move |event| {
+                    if let TtsSynthesisEvent::AudioChunk(chunk) = event {
+                        let Ok(buffer) = playback_buffer_from_tts(&chunk.audio) else {
+                            return;
+                        };
+                        let queued_duration_sec = {
+                            let mut queued = queued_for_events.lock();
+                            *queued += buffer.duration().as_secs_f64();
+                            *queued
+                        };
+                        let playback_position_sec = {
+                            let mut first_audio = first_audio_for_events.lock();
+                            let first_audio = first_audio.get_or_insert_with(Instant::now);
+                            first_audio.elapsed().as_secs_f64()
+                        };
+                        if let Some(output) = output_for_events.lock().output.as_ref() {
+                            output.enqueue(buffer);
+                        }
+                        emit_debug_tts_stream_event(
+                            &app_for_events,
+                            DebugTtsStreamEvent::progress(
+                                run_id_for_events.clone(),
+                                DebugTtsStreamEventKind::Chunk,
+                                queued_duration_sec,
+                                playback_position_sec,
+                            )
+                            .with_sequence(chunk.sequence),
+                        );
+                    }
+                }),
+            )
+            .await;
+        match stream_result {
+            Ok(result) => {
+                let mut inner = self.inner.lock();
+                inner.latest_result = Some(result);
+                inner.snapshot.has_buffered_audio = true;
+            }
+            Err(err) => {
+                let message = err.to_string();
+                self.set_state(Some(&app), TtsState::Failed, Some(message.clone()));
+                emit_debug_tts_stream_event(
+                    &app,
+                    DebugTtsStreamEvent::new(run_id.clone(), DebugTtsStreamEventKind::Error)
+                        .with_error(message.clone()),
+                );
+                return Err(message);
+            }
+        }
+
+        if self.debug_stream_cancelled(playback_epoch) {
+            self.set_state(Some(&app), TtsState::Idle, None);
+            return Ok(DebugTtsStreamResult {
+                run_id,
+                status: self.status(),
+            });
+        }
+
+        let queued_duration_sec = *queued_duration.lock();
+        let playback_deadline =
+            Instant::now() + Duration::from_secs_f64(queued_duration_sec.max(0.0));
+        while Instant::now() < playback_deadline {
+            if self.debug_stream_cancelled(playback_epoch) {
+                break;
+            }
+            let elapsed = first_audio_at
+                .lock()
+                .map(|instant| instant.elapsed().as_secs_f64())
+                .unwrap_or(0.0);
+            emit_debug_tts_stream_event(
+                &app,
+                DebugTtsStreamEvent::progress(
+                    run_id.clone(),
+                    DebugTtsStreamEventKind::Chunk,
+                    queued_duration_sec,
+                    elapsed,
+                ),
+            );
+            sleep(Duration::from_millis(100)).await;
+        }
+
+        {
+            let mut inner = self.inner.lock();
+            if inner.playback_epoch == playback_epoch {
+                inner.output.take();
+            }
+        }
+        emit_debug_tts_stream_event(
+            &app,
+            DebugTtsStreamEvent::progress(
+                run_id.clone(),
+                DebugTtsStreamEventKind::End,
+                queued_duration_sec,
+                queued_duration_sec,
+            ),
+        );
+        self.set_state(Some(&app), TtsState::Idle, None);
+        Ok(DebugTtsStreamResult {
+            run_id,
+            status: self.status(),
+        })
+    }
+
+    fn debug_stream_cancelled(&self, playback_epoch: u64) -> bool {
+        let inner = self.inner.lock();
+        inner.cancel_requested || inner.playback_epoch != playback_epoch
+    }
+
     pub async fn speak_agent_result(
         &self,
         app: AppHandle,
@@ -918,6 +1162,19 @@ pub async fn debug_play_tts(
 ) -> Result<TtsStatusSnapshot, String> {
     runtime
         .play_buffered(app, vad_state, vad_config_state)
+        .await
+}
+
+#[tauri::command]
+pub async fn debug_stream_tts(
+    app: AppHandle,
+    runtime: tauri::State<'_, TtsRuntime>,
+    run_id: String,
+    text: String,
+    config: Option<TtsConfig>,
+) -> Result<DebugTtsStreamResult, String> {
+    runtime
+        .stream_play_debug(app, run_id, text, config.unwrap_or_default())
         .await
 }
 

@@ -15,8 +15,8 @@ tokenizers = "0.22.2"
 sentencepiece = "0.13.1"
 hound = "3.5.1"
 symphonia = { version = "0.5", features = ["all"] }
-tokio = { version = "1", features = ["rt", "sync"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
