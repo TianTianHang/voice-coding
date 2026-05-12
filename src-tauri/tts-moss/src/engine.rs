@@ -254,7 +254,8 @@ fn synthesize_chunks(
 
 fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTtsError> {
     let mut total_samples = 0usize;
-    for result in &results {
+    let pause_samples = pause_samples_between_chunks(results.len());
+    for (index, result) in results.iter().enumerate() {
         if result.audio.sample_rate_hz != PLAYBACK_SAMPLE_RATE_HZ
             || result.audio.channels != PLAYBACK_CHANNELS
         {
@@ -268,6 +269,11 @@ fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTts
                 total_samples = total_samples.checked_add(samples.len()).ok_or_else(|| {
                     MossTtsError::OutputFormat("chunk PCM length overflowed usize".to_string())
                 })?;
+                if index + 1 < results.len() {
+                    total_samples = total_samples.checked_add(pause_samples).ok_or_else(|| {
+                        MossTtsError::OutputFormat("chunk pause PCM length overflowed usize".to_string())
+                    })?;
+                }
             }
             PcmData::I16(_) => {
                 return Err(MossTtsError::OutputFormat(
@@ -283,9 +289,13 @@ fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTts
         });
     }
     let mut pcm = Vec::with_capacity(total_samples);
-    for result in results {
+    let result_count = results.len();
+    for (index, result) in results.into_iter().enumerate() {
         if let PcmData::F32(mut samples) = result.audio.pcm {
             pcm.append(&mut samples);
+            if index + 1 < result_count {
+                pcm.extend(std::iter::repeat_n(0.0, pause_samples));
+            }
         }
     }
     Ok(TtsResult {
@@ -295,4 +305,12 @@ fn concatenate_tts_results(results: Vec<TtsResult>) -> Result<TtsResult, MossTts
             pcm: PcmData::F32(pcm),
         },
     })
+}
+
+fn pause_samples_between_chunks(chunk_count: usize) -> usize {
+    if chunk_count > 1 {
+        PLAYBACK_SAMPLE_RATE_HZ as usize * PLAYBACK_CHANNELS as usize / 5
+    } else {
+        0
+    }
 }

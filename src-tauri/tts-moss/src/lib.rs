@@ -142,6 +142,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_bool_env_values() {
+        assert_eq!(parse_bool_env("1"), Some(true));
+        assert_eq!(parse_bool_env("true"), Some(true));
+        assert_eq!(parse_bool_env("OFF"), Some(false));
+        assert_eq!(parse_bool_env("0"), Some(false));
+        assert_eq!(parse_bool_env("maybe"), None);
+    }
+
+    #[test]
     fn sampling_mode_defaults_to_fixed() {
         assert_eq!(
             MossSamplingMode::from_config(&TtsConfig::default()).unwrap(),
@@ -428,6 +437,26 @@ mod tests {
     }
 
     #[test]
+    fn decode_present_outputs_reject_mismatched_past_contract() {
+        let fixture = MossFixture::new();
+        let mut tts_meta = std::fs::read_to_string(fixture.tts_dir.join("tts_browser_onnx_meta.json"))
+            .unwrap();
+        tts_meta = tts_meta.replace(
+            r#""decode_output_names": ["global_hidden"]"#,
+            r#""decode_output_names": ["global_hidden", "present_key_0"]"#,
+        );
+        std::fs::write(fixture.tts_dir.join("tts_browser_onnx_meta.json"), tts_meta).unwrap();
+        let assets = MossAssets::load(MossModelConfig {
+            model_dir: fixture.tts_dir,
+        })
+        .unwrap();
+        let err = decode_present_name_pairs(&assets)
+            .expect_err("mismatched decode past contract should fail before output removal");
+
+        assert!(err.to_string().contains("count mismatch"));
+    }
+
+    #[test]
     fn pcm_chunk_buffer_concatenates_chunks_to_playback_result() {
         let mut buffer = PcmChunkBuffer::default();
         buffer.push_chunk(vec![0.1, 0.2]);
@@ -530,11 +559,14 @@ mod tests {
 
         assert_eq!(audio_sequences, vec![1, 2, 3, 4]);
         assert!(matches!(events.last(), Some(TtsSynthesisEvent::End(_))));
+        let expected_pause = pause_samples_between_chunks(2);
         assert!(
-            matches!(result.audio.pcm, PcmData::F32(samples) if samples == vec![
-                0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3,
-                0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3
-            ])
+            matches!(result.audio.pcm, PcmData::F32(samples)
+                if samples.len() == 16 + expected_pause
+                    && samples[..8] == [0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3]
+                    && samples[8..8 + expected_pause].iter().all(|sample| *sample == 0.0)
+                    && samples[8 + expected_pause..] == [0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3]
+            )
         );
     }
 
@@ -649,9 +681,14 @@ mod tests {
 
         assert_eq!(result.audio.sample_rate_hz, PLAYBACK_SAMPLE_RATE_HZ);
         assert_eq!(result.audio.channels, PLAYBACK_CHANNELS);
+        let expected_pause = pause_samples_between_chunks(2);
         assert!(matches!(
             result.audio.pcm,
-            PcmData::F32(samples) if samples == vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]
+            PcmData::F32(samples)
+                if samples.len() == 6 + expected_pause
+                    && samples[..4] == [0.1, 0.2, 0.3, 0.4]
+                    && samples[4..4 + expected_pause].iter().all(|sample| *sample == 0.0)
+                    && samples[4 + expected_pause..] == [0.5, 0.6]
         ));
     }
 
@@ -767,7 +804,7 @@ mod tests {
     }
 
     fn samples_for_text(text: &str, base: f32) -> Vec<f32> {
-        let frames = text.chars().count().max(1).min(4);
+        let frames = text.chars().count().clamp(1, 4);
         let mut samples = Vec::with_capacity(frames * PLAYBACK_CHANNELS as usize);
         for _ in 0..frames {
             samples.push(base);
@@ -865,7 +902,7 @@ mod tests {
     "user_prompt_after_reference_token_ids": [3, 4],
     "assistant_prompt_prefix_token_ids": [5]
   }},
-  "generation_defaults": {{ "max_new_frames": 4 }},
+  "generation_defaults": {{ "max_new_frames": 4, "audio_repetition_penalty": 1.2 }},
   "builtin_voices": [
     {{ "voice": "Junhao", "prompt_audio_codes": [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]] }},
     {{ "voice": "Ava", "prompt_audio_codes": [[16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1]] }}
@@ -892,12 +929,31 @@ mod tests {
     "prefill.onnx": ["tts_shared.data"],
     "decode_step.onnx": ["tts_shared.data"]
   },
+  "model_config": {
+    "local_layers": 1,
+    "local_heads": 12,
+    "local_head_dim": 64
+  },
   "onnx": {
     "prefill_output_names": ["global_hidden"],
-    "decode_input_names": ["input_ids"],
+    "decode_input_names": ["input_ids", "past_valid_lengths"],
     "decode_output_names": ["global_hidden"],
-    "local_cached_input_names": ["global_hidden", "text_token_id"],
-    "local_cached_output_names": ["text_logits", "audio_logits"]
+    "local_cached_input_names": [
+      "global_hidden",
+      "text_token_id",
+      "audio_token_id",
+      "channel_index",
+      "step_type",
+      "past_valid_lengths",
+      "local_past_key_0",
+      "local_past_value_0"
+    ],
+    "local_cached_output_names": [
+      "text_logits",
+      "audio_logits",
+      "local_present_key_0",
+      "local_present_value_0"
+    ]
   }
 }"#,
             )

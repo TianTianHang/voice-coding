@@ -38,6 +38,48 @@ struct PromptTemplates {
 #[derive(Debug, Clone, Deserialize)]
 struct GenerationDefaults {
     max_new_frames: u32,
+    #[serde(default = "default_text_temperature")]
+    text_temperature: f32,
+    #[serde(default = "default_text_top_p")]
+    text_top_p: f32,
+    #[serde(default = "default_text_top_k")]
+    text_top_k: usize,
+    #[serde(default = "default_audio_temperature")]
+    audio_temperature: f32,
+    #[serde(default = "default_audio_top_p")]
+    audio_top_p: f32,
+    #[serde(default = "default_audio_top_k")]
+    audio_top_k: usize,
+    #[serde(default = "default_audio_repetition_penalty")]
+    audio_repetition_penalty: f32,
+}
+
+fn default_text_temperature() -> f32 {
+    1.0
+}
+
+fn default_text_top_p() -> f32 {
+    1.0
+}
+
+fn default_text_top_k() -> usize {
+    50
+}
+
+fn default_audio_temperature() -> f32 {
+    0.8
+}
+
+fn default_audio_top_p() -> f32 {
+    0.95
+}
+
+fn default_audio_top_k() -> usize {
+    25
+}
+
+fn default_audio_repetition_penalty() -> f32 {
+    1.2
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,7 +95,19 @@ struct TtsMeta {
     files: HashMap<String, String>,
     #[serde(default)]
     external_data_files: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    model_config: TtsModelConfig,
     onnx: TtsOnnxMeta,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct TtsModelConfig {
+    #[serde(default)]
+    local_layers: usize,
+    #[serde(default)]
+    local_heads: usize,
+    #[serde(default)]
+    local_head_dim: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]

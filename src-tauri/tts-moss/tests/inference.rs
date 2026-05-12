@@ -173,7 +173,13 @@ async fn synthesizes_playback_ready_audio_with_greedy_streaming_decode() {
         .expect("synthesized audio must satisfy playback contract");
     assert_eq!(result.audio.sample_rate_hz, PLAYBACK_SAMPLE_RATE_HZ);
     assert_eq!(result.audio.channels, PLAYBACK_CHANNELS);
+    let duration_sec = audio_duration_sec(&result);
+    eprintln!("greedy streaming decode audio duration: {duration_sec:.3}s");
     assert!(result.audio.pcm.len_frames(result.audio.channels) > 0);
+    assert!(
+        duration_sec < 10.0,
+        "short greedy synthesis should stop before max_new_frames duration, got {duration_sec:.3}s"
+    );
 }
 
 #[tokio::test]
