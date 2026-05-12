@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+// Compatibility hook for the legacy VAD command/event surface. New frontend
+// work should prefer useBusinessApi and the business status events.
 export type VADState = "idle" | "listening" | "recording" | "processing";
 
 export interface BackendVADResult {

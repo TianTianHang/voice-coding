@@ -483,6 +483,8 @@ pub fn emit_agent_event(app: &AppHandle, event: AgentEvent) {
 }
 
 pub fn emit_agent_status(app: &AppHandle, status: AgentStatus) {
+    crate::business::emit_agent_status_changed(app, &status);
+    crate::business::emit_app_status_changed(app);
     let _ = app.emit("agent-status", status);
 }
 

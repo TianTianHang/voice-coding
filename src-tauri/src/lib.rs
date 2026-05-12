@@ -1,6 +1,7 @@
 mod acp;
 mod asr;
 mod audio;
+mod business;
 mod model_paths;
 mod tts;
 mod vad;
@@ -67,6 +68,7 @@ pub fn run() {
         .manage(vad_commands::VadRecorderState::new())
         .manage(vad_commands::VadRuntimeConfigState::new())
         .manage(acp::AcpRuntime::default())
+        .manage(business::BusinessRuntime::default())
         .manage(AppLifecycleState::new())
         .setup(|app| {
             log::info!("voice-coding backend setup started");
@@ -118,6 +120,26 @@ pub fn run() {
             tts::set_auto_tts_enabled,
             tts::stop_auto_tts,
             tts::speak_latest_result,
+            business::get_app_status,
+            business::prepare_app,
+            business::get_app_preferences,
+            business::set_app_preferences,
+            business::start_voice_session,
+            business::stop_voice_session,
+            business::pause_voice_session,
+            business::resume_voice_session,
+            business::get_voice_session_status,
+            business::update_voice_session_config,
+            business::submit_transcript_to_agent,
+            business::edit_and_submit_transcript,
+            business::discard_transcript,
+            business::send_agent_message,
+            business::cancel_agent_turn,
+            business::speak_text,
+            business::speak_agent_result,
+            business::stop_speech,
+            business::get_speech_status,
+            business::set_speech_preferences,
             vad_commands::start_listening,
             vad_commands::stop_listening,
             vad_commands::get_vad_state,

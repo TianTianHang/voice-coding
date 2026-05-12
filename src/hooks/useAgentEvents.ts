@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 
+// Compatibility hook for the legacy ACP event stream. New frontend work should
+// use the business API for primary Agent status and turn state.
 export type AgentEventKind =
   | "thinking"
   | "tool"

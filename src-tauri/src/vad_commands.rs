@@ -72,7 +72,7 @@ impl VadRecorderState {
         guard.take()
     }
 
-    fn current_active_session(&self) -> Option<u64> {
+    pub fn current_active_session(&self) -> Option<u64> {
         *self.active_session.lock()
     }
 
@@ -156,8 +156,11 @@ fn vad_pcm_audio_input(samples: Vec<i16>) -> AudioInput {
 
 fn send_prompt_to_agent_in_background(app: AppHandle, session_id: u64, prompt: String) {
     tauri::async_runtime::spawn(async move {
-        let runtime = app.state::<crate::acp::AcpRuntime>();
-        if let Err(e) = runtime.send_prompt(app.clone(), prompt).await {
+        let runtime = app.state::<crate::business::BusinessRuntime>();
+        if let Err(e) = runtime
+            .handle_transcribed_utterance(app.clone(), session_id, prompt)
+            .await
+        {
             log::warn!(
                 "failed to send transcript to ACP agent: session_id={} error={}",
                 session_id,
@@ -284,6 +287,8 @@ pub async fn start_listening(
                             "vad-state",
                             serde_json::json!({ "state": s.to_string(), "sessionId": session_id }),
                         );
+                        let runtime = app_clone.state::<crate::business::BusinessRuntime>();
+                        runtime.update_voice_from_vad(&app_clone, session_id, s);
                     }
                 }
                 crate::vad::VadEvent::SpeechDetected(audio_data) => {
@@ -323,6 +328,7 @@ pub async fn start_listening(
                                     "error",
                                     serde_json::json!({ "message": e, "sessionId": session_id }),
                                 );
+                                crate::business::emit_runtime_error(&app_clone, "voice", e, true);
                                 crate::acp::session::emit_agent_event(
                                     &app_clone,
                                     crate::acp::AgentEvent::error("Speech transcription failed"),
@@ -341,6 +347,15 @@ pub async fn start_listening(
                         let _ = app_clone.emit(
                             "error",
                             serde_json::json!({ "message": msg, "sessionId": session_id }),
+                        );
+                        crate::business::emit_runtime_error(&app_clone, "voice", msg.clone(), true);
+                        let runtime = app_clone.state::<crate::business::BusinessRuntime>();
+                        runtime.set_voice_status(
+                            &app_clone,
+                            Some(session_id),
+                            crate::business::VoiceSessionState::Failed,
+                            None,
+                            Some(msg.clone()),
                         );
                         let mut sm_guard = sm.lock();
                         sm_guard.stop();
@@ -427,6 +442,14 @@ pub fn stop_listening(
             "vad-state",
             serde_json::json!({ "state": VadState::Idle.to_string(), "sessionId": session_id }),
         );
+        let runtime = app.state::<crate::business::BusinessRuntime>();
+        runtime.set_voice_status(
+            &app,
+            None,
+            crate::business::VoiceSessionState::Idle,
+            None,
+            None,
+        );
     }
 
     {
@@ -440,6 +463,10 @@ pub fn stop_listening(
 pub fn pause_listening_for_playback(
     state: tauri::State<'_, VadRecorderState>,
 ) -> Result<bool, String> {
+    pause_listening_for_playback_state(&state)
+}
+
+fn pause_listening_for_playback_state(state: &VadRecorderState) -> Result<bool, String> {
     let Some(session_id) = state.current_active_session() else {
         return Ok(false);
     };
@@ -456,9 +483,32 @@ pub fn pause_listening_for_playback(
     Ok(true)
 }
 
+pub fn pause_listening_for_playback_with_app(
+    app: &AppHandle,
+    state: tauri::State<'_, VadRecorderState>,
+) -> Result<bool, String> {
+    let session_id = state.current_active_session();
+    let paused = pause_listening_for_playback(state)?;
+    if paused {
+        let runtime = app.state::<crate::business::BusinessRuntime>();
+        runtime.set_voice_status(
+            app,
+            session_id,
+            crate::business::VoiceSessionState::Paused,
+            Some(crate::business::VoicePauseReason::TtsPlayback),
+            None,
+        );
+    }
+    Ok(paused)
+}
+
 pub fn resume_listening_after_playback(
     state: tauri::State<'_, VadRecorderState>,
 ) -> Result<bool, String> {
+    resume_listening_after_playback_state(&state)
+}
+
+fn resume_listening_after_playback_state(state: &VadRecorderState) -> Result<bool, String> {
     let Some(session_id) = state.current_active_session() else {
         return Ok(false);
     };
@@ -473,6 +523,25 @@ pub fn resume_listening_after_playback(
     let mut sm = sm.lock();
     sm.start();
     Ok(true)
+}
+
+pub fn resume_listening_after_playback_with_app(
+    app: &AppHandle,
+    state: tauri::State<'_, VadRecorderState>,
+) -> Result<bool, String> {
+    let session_id = state.current_active_session();
+    let resumed = resume_listening_after_playback(state)?;
+    if resumed {
+        let runtime = app.state::<crate::business::BusinessRuntime>();
+        runtime.set_voice_status(
+            app,
+            session_id,
+            crate::business::VoiceSessionState::Listening,
+            None,
+            None,
+        );
+    }
+    Ok(resumed)
 }
 
 #[tauri::command]
@@ -527,5 +596,22 @@ mod tests {
             result.err().as_deref(),
             Some("threshold must be between 0.0 and 1.0")
         );
+    }
+
+    #[test]
+    fn playback_pause_and_resume_keep_active_session_identity() {
+        let state = VadRecorderState::new();
+        state.set_active_session(99);
+
+        let before_pause = state.current_active_session();
+        let paused = pause_listening_for_playback_state(&state).unwrap();
+        let after_pause = state.current_active_session();
+        let resumed = resume_listening_after_playback_state(&state).unwrap();
+
+        assert!(!paused);
+        assert!(!resumed);
+        assert_eq!(before_pause, Some(99));
+        assert_eq!(after_pause, Some(99));
+        assert_eq!(state.current_active_session(), Some(99));
     }
 }

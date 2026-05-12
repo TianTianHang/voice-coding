@@ -231,6 +231,7 @@ impl TtsRuntime {
         };
         if let Some(app) = app {
             let _ = app.emit("tts-state", &snapshot);
+            crate::business::emit_speech_from_tts(app, &snapshot);
         }
         log::debug!(
             "TTS state updated: state={:?} has_buffered_audio={} error={:?}",
@@ -260,6 +261,7 @@ impl TtsRuntime {
         };
         if let Some(app) = app {
             let _ = app.emit("auto-tts-state", &snapshot);
+            crate::business::emit_speech_from_auto_tts(app, &snapshot.tts, snapshot.last_status);
         }
         log::debug!(
             "auto TTS state updated: status={:?} enabled={} playing={} skip={:?}",
@@ -388,6 +390,17 @@ impl TtsRuntime {
         Self::stop_playback_locked(&mut inner);
     }
 
+    pub fn take_paused_recording(&self) -> bool {
+        let mut inner = self.inner.lock();
+        let paused = inner.paused_recording;
+        inner.paused_recording = false;
+        paused
+    }
+
+    pub fn force_idle(&self, app: Option<&AppHandle>) {
+        self.set_state(app, TtsState::Idle, None);
+    }
+
     pub async fn play_buffered(
         &self,
         app: AppHandle,
@@ -409,7 +422,10 @@ impl TtsRuntime {
         let had_active_session = vad_state.has_active_session();
         if had_active_session {
             log::info!("pausing VAD recording for TTS playback");
-            let paused = crate::vad_commands::pause_listening_for_playback(vad_state.clone())?;
+            let paused = crate::vad_commands::pause_listening_for_playback_with_app(
+                &app,
+                vad_state.clone(),
+            )?;
             self.inner.lock().paused_recording = paused;
         }
 
@@ -422,7 +438,10 @@ impl TtsRuntime {
                 self.set_state(Some(&app), TtsState::Failed, Some(e.to_string()));
                 if self.inner.lock().paused_recording {
                     log::info!("resuming VAD recording after TTS output creation failure");
-                    let _ = crate::vad_commands::resume_listening_after_playback(vad_state.clone());
+                    let _ = crate::vad_commands::resume_listening_after_playback_with_app(
+                        &app,
+                        vad_state.clone(),
+                    );
                     self.inner.lock().paused_recording = false;
                 }
                 return Err("Failed to create output stream".to_string());
@@ -476,7 +495,7 @@ impl TtsRuntime {
         if should_resume_recording {
             log::info!("resuming VAD recording after TTS playback");
             let _ = vad_config_state;
-            crate::vad_commands::resume_listening_after_playback(vad_state)?;
+            crate::vad_commands::resume_listening_after_playback_with_app(&app, vad_state)?;
             let mut inner = self.inner.lock();
             if inner.playback_epoch == playback_epoch {
                 inner.paused_recording = false;
@@ -911,8 +930,8 @@ pub async fn cancel_tts_playback(
 
     let should_resume = runtime.inner.lock().paused_recording;
     if should_resume {
-        let _ =
-            crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await;
+        let _ = vad_config_state;
+        let _ = crate::vad_commands::resume_listening_after_playback_with_app(&app, vad_state);
         runtime.inner.lock().paused_recording = false;
     }
 
@@ -947,8 +966,8 @@ pub async fn stop_auto_tts(
 
     let should_resume = runtime.inner.lock().paused_recording;
     if should_resume {
-        let _ =
-            crate::vad_commands::start_listening(app.clone(), vad_state, vad_config_state).await;
+        let _ = vad_config_state;
+        let _ = crate::vad_commands::resume_listening_after_playback_with_app(&app, vad_state);
         runtime.inner.lock().paused_recording = false;
     }
 
