@@ -4,7 +4,7 @@ React UI components for the voice assistant console. Components here should stay
 
 ## Module Map
 - `AssistantConsole.tsx` is the main experience shell: business API voice state, transcript actions, Agent timeline, close behavior, and speech controls.
-- `AgentEventStream.tsx` renders ACP agent events, tool calls, confirmations, diffs, and session state updates.
+- `AgentEventStream.tsx` renders backend Agent timeline items, including tool calls, confirmations, diffs, messages, thinking, errors, and fallback/status updates.
 - `VoiceRecorder.tsx` is the focused recorder UI around backend VAD state.
 - `AudioVisualizer.tsx` renders visual feedback for listening/recording states.
 - `ControlButton.tsx` is the reusable start/stop/action button.
@@ -12,9 +12,10 @@ React UI components for the voice assistant console. Components here should stay
 
 ## Key Relationships
 - `AssistantConsole` consumes `useBusinessApi` as the main product-flow facade for app readiness, voice sessions, transcript lifecycle, Agent connection/turn status, speech output, and runtime errors.
-- `AssistantConsole` may consume `useAgentEvents` only for ACP content-stream rendering: thinking, tool calls, result text, diffs, confirmations, plans, and confirmation responses.
+- `AssistantConsole` consumes `useAgentStream` for Agent content-stream rendering: thinking, tool calls, result text, diffs, confirmations, plans, and confirmation responses.
+- `AssistantConsole` must not import `useAgentEvents`; that hook is reserved for debug/compat flows.
 - Do not reintroduce `useBackendVAD`, `useAsrStatus`, direct debug transcription, or debug TTS status hooks into the main console flow; those belong to debug/compat views such as `DebugToolsWindow` or focused legacy components.
-- Agent confirmation buttons must call `respondToConfirmation` from `useAgentEvents`; do not call Tauri directly from deep rendering helpers unless the hook cannot own it.
+- Agent confirmation buttons must call `respondToConfirmation` from `useAgentStream`; do not call Tauri directly from deep rendering helpers unless the hook cannot own it.
 - Voice display state in the main console should be derived from business `VoiceSessionStatus`, not legacy VAD state names.
 
 ## Editing Notes

@@ -150,6 +150,8 @@ pub fn run() {
             acp::session::get_agent_status,
             acp::session::send_agent_prompt,
             acp::session::respond_agent_confirmation,
+            acp::timeline::get_agent_timeline,
+            acp::timeline::respond_agent_stream_confirmation,
             set_close_behavior,
         ])
         .run(tauri::generate_context!())

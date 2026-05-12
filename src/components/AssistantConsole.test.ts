@@ -4,14 +4,16 @@ import {
   deriveVoiceExperienceState,
   shouldExpandTimelineForEvent,
 } from "./AssistantConsole";
-import type { AgentEvent } from "../hooks/useAgentEvents";
+import type { AgentTimelineItem } from "../hooks/useAgentStream";
 
-function event(overrides: Partial<AgentEvent>): AgentEvent {
+function event(overrides: Partial<AgentTimelineItem>): AgentTimelineItem {
   return {
     id: "event-1",
-    kind: "result",
+    kind: "message",
+    sequence: 1,
     content: "hello",
     createdAt: 1,
+    updatedAt: 1,
     ...overrides,
   };
 }
@@ -74,7 +76,7 @@ describe("deriveVoiceExperienceState", () => {
         wakeDetected: false,
         agent: { connected: true },
         speech: { state: "idle", autoSpeakAgentResults: true },
-        latestAgentEvent: event({ kind: "result", content: "Done" }),
+        latestAgentEvent: event({ kind: "message", content: "Done" }),
       }),
     ).toBe("Responding");
   });
@@ -105,8 +107,12 @@ describe("shouldExpandTimelineForEvent", () => {
     expect(
       shouldExpandTimelineForEvent(
         event({
-          kind: "confirm",
-          confirmationId: "confirm-1",
+          kind: "confirmation",
+          confirmation: {
+            confirmationId: "confirm-1",
+            status: "pending",
+            content: "Apply changes?",
+          },
           content: "Apply changes?",
         }),
       ),
@@ -122,7 +128,7 @@ describe("shouldExpandTimelineForEvent", () => {
   it("keeps ordinary events in the collapsed timeline path", () => {
     expect(
       shouldExpandTimelineForEvent(
-        event({ kind: "result", content: "Done" }),
+        event({ kind: "message", content: "Done" }),
       ),
     ).toBe(false);
   });

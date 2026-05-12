@@ -18,6 +18,7 @@ use super::events::{
     AgentToolPayload,
 };
 use super::session::emit_agent_event;
+use super::timeline::AgentStreamRuntime;
 
 pub type PendingPermissions = Arc<Mutex<HashMap<String, PendingPermission>>>;
 
@@ -32,6 +33,7 @@ pub struct VoiceCodingAcpClient {
     app: AppHandle,
     pending: PendingPermissions,
     result_tracker: AgentResultTracker,
+    stream_runtime: AgentStreamRuntime,
 }
 
 impl VoiceCodingAcpClient {
@@ -39,11 +41,13 @@ impl VoiceCodingAcpClient {
         app: AppHandle,
         pending: PendingPermissions,
         result_tracker: AgentResultTracker,
+        stream_runtime: AgentStreamRuntime,
     ) -> Self {
         Self {
             app,
             pending,
             result_tracker,
+            stream_runtime,
         }
     }
 
@@ -58,6 +62,8 @@ impl VoiceCodingAcpClient {
             );
         }
         self.result_tracker.observe(&event);
+        self.stream_runtime
+            .handle_agent_event(Some(&self.app), event.clone());
         emit_agent_event(&self.app, event);
     }
 
@@ -90,6 +96,8 @@ impl VoiceCodingAcpClient {
             Some(confirmation_id),
         );
         event.confirm_status = Some("pending".into());
+        self.stream_runtime
+            .handle_agent_event(Some(&self.app), event.clone());
         emit_agent_event(&self.app, event);
         Ok(())
     }

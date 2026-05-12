@@ -3,9 +3,10 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import {
-  useAgentEvents,
-  type AgentEvent,
-} from "../hooks/useAgentEvents";
+  timelineItemToAgentEventKind,
+  useAgentStream,
+  type AgentTimelineItem,
+} from "../hooks/useAgentStream";
 import {
   useBusinessApi,
   type AgentStatus,
@@ -88,7 +89,7 @@ type ExperienceInput = {
   agentTurn?: AgentTurnStatus | null;
   speech: SpeechOutputStatus;
   runtimeError?: RuntimeErrorEvent | null;
-  latestAgentEvent?: AgentEvent;
+  latestAgentEvent?: AgentTimelineItem;
 };
 
 const experienceCopy: Record<
@@ -147,7 +148,8 @@ export function deriveVoiceExperienceState({
     speech.state === "failed" ||
     runtimeError ||
     agent.error ||
-    latestAgentEvent?.kind === "error"
+    (latestAgentEvent &&
+      timelineItemToAgentEventKind(latestAgentEvent.kind) === "error")
   ) {
     return "Error";
   }
@@ -156,7 +158,10 @@ export function deriveVoiceExperienceState({
     return "WakeDetected";
   }
 
-  if (latestAgentEvent?.kind === "result") {
+  if (
+    latestAgentEvent &&
+    timelineItemToAgentEventKind(latestAgentEvent.kind) === "result"
+  ) {
     return "Responding";
   }
 
@@ -166,9 +171,10 @@ export function deriveVoiceExperienceState({
     agentTurn?.state === "running" ||
     speech.state === "synthesizing" ||
     speech.state === "ready" ||
-    latestAgentEvent?.kind === "thinking" ||
-    latestAgentEvent?.kind === "tool" ||
-    latestAgentEvent?.kind === "status"
+    (latestAgentEvent &&
+      ["thinking", "tool", "status"].includes(
+        timelineItemToAgentEventKind(latestAgentEvent.kind),
+      ))
   ) {
     return "Processing";
   }
@@ -185,17 +191,24 @@ export function deriveVoiceExperienceState({
   return "Dormant";
 }
 
-function latestEventOfKind(events: AgentEvent[], kind: AgentEvent["kind"]) {
+function latestEventOfKind(
+  events: AgentTimelineItem[],
+  kind: ReturnType<typeof timelineItemToAgentEventKind>,
+) {
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    if (events[index].kind === kind) {
+    if (timelineItemToAgentEventKind(events[index].kind) === kind) {
       return events[index];
     }
   }
   return undefined;
 }
 
-export function shouldExpandTimelineForEvent(event?: AgentEvent): boolean {
-  return event?.kind === "confirm" || event?.kind === "error";
+export function shouldExpandTimelineForEvent(event?: AgentTimelineItem): boolean {
+  if (!event) {
+    return false;
+  }
+  const kind = timelineItemToAgentEventKind(event.kind);
+  return kind === "confirm" || kind === "error";
 }
 
 export function autoTtsStatusLabel(status?: AutoTtsStatusSnapshot | null): string {
@@ -424,7 +437,7 @@ export function AssistantConsole() {
   const [draftTranscript, setDraftTranscript] = useState("");
   const [autoTtsStatus, setAutoTtsStatus] = useState<AutoTtsStatusSnapshot | null>(null);
   const [debugWindowMessage, setDebugWindowMessage] = useState<string | null>(null);
-  const agent = useAgentEvents();
+  const agent = useAgentStream();
   const business = useBusinessApi();
   const businessStatus = business.status;
   const voice = businessStatus?.voice;
@@ -443,7 +456,7 @@ export function AssistantConsole() {
       ? ""
       : business.latestUtterance?.transcript || "";
   const latestAgentEvent =
-    agent.events.length > 0 ? agent.events[agent.events.length - 1] : undefined;
+    agent.items.length > 0 ? agent.items[agent.items.length - 1] : undefined;
 
   useEffect(() => {
     const status = autoTtsStatusFromBusiness(
@@ -499,11 +512,11 @@ export function AssistantConsole() {
   const copy = experienceCopy[experienceState];
 
   const feedback = useMemo(() => {
-    const responseEvent = latestEventOfKind(agent.events, "result");
-    const thinkingEvent = latestEventOfKind(agent.events, "thinking");
-    const toolEvent = latestEventOfKind(agent.events, "tool");
-    const statusEvent = latestEventOfKind(agent.events, "status");
-    const errorEvent = latestEventOfKind(agent.events, "error");
+    const responseEvent = latestEventOfKind(agent.items, "result");
+    const thinkingEvent = latestEventOfKind(agent.items, "thinking");
+    const toolEvent = latestEventOfKind(agent.items, "tool");
+    const statusEvent = latestEventOfKind(agent.items, "status");
+    const errorEvent = latestEventOfKind(agent.items, "error");
 
     return {
       heard: speechError || transcript || "",
@@ -519,7 +532,7 @@ export function AssistantConsole() {
         copy.status,
       response: responseEvent?.content || "",
     };
-  }, [agent.events, copy.intent, copy.status, speechError, transcript]);
+  }, [agent.items, copy.intent, copy.status, speechError, transcript]);
 
   async function toggleVoiceSession() {
     if (!voice || !canToggleVoiceSession(voice)) {
@@ -670,8 +683,8 @@ export function AssistantConsole() {
     }
   }
 
-  const responseEvent = latestEventOfKind(agent.events, "result");
-  const selectedEvent = latestAgentEvent ?? agent.events[agent.events.length - 1];
+  const responseEvent = latestEventOfKind(agent.items, "result");
+  const selectedEvent = latestAgentEvent ?? agent.items[agent.items.length - 1];
 
   if (activeView !== "main") {
     return (
@@ -729,7 +742,7 @@ export function AssistantConsole() {
 
           {activeView === "events" && (
             <EventDetailPage
-              events={agent.events}
+              events={agent.items}
               selectedEvent={selectedEvent}
               plan={agent.plan}
               onConfirm={agent.respondToConfirmation}
@@ -896,12 +909,12 @@ export function AssistantConsole() {
         )}
 
         <AgentEventStream
-          events={agent.events}
+          events={agent.items}
           expanded
           fixedHeight
           onConfirm={agent.respondToConfirmation}
           onToggleExpanded={() => {
-            if (agent.events.length > 0) {
+            if (agent.items.length > 0) {
               setActiveView("events");
             }
           }}
@@ -1258,7 +1271,7 @@ function ResponseDetailPage({
   onStopSpeech,
 }: {
   response: string;
-  event?: AgentEvent;
+  event?: AgentTimelineItem;
   plan?: { entries: { content: string; priority: string; status: string }[] };
   onOpenEvents: () => void;
   onSpeak: () => void;
@@ -1340,8 +1353,8 @@ function EventDetailPage({
   plan,
   onConfirm,
 }: {
-  events: AgentEvent[];
-  selectedEvent?: AgentEvent;
+  events: AgentTimelineItem[];
+  selectedEvent?: AgentTimelineItem;
   plan?: { entries: { content: string; priority: string; status: string }[] };
   onConfirm: (confirmationId: string, accepted: boolean) => Promise<void>;
 }) {
@@ -1352,21 +1365,30 @@ function EventDetailPage({
         <SectionTitle icon={<InfoGlyph />} title="事件细节" />
         {selectedEvent ? (
           <div className="mt-4 grid gap-3">
-            <KeyValueRow label="类型" value={selectedEvent.kind} />
+            <KeyValueRow
+              label="类型"
+              value={timelineItemToAgentEventKind(selectedEvent.kind)}
+            />
             {selectedEvent.title && <KeyValueRow label="标题" value={selectedEvent.title} />}
             {selectedEvent.content && <KeyValueRow label="内容" value={selectedEvent.content} />}
-            {selectedEvent.confirmationId && (
+            {selectedEvent.confirmation && (
               <div className="grid grid-cols-2 gap-2">
                 <button
                   className="min-h-10 cursor-pointer rounded-md bg-emerald-500 px-3 text-sm font-black text-slate-950 transition-colors duration-200 hover:bg-emerald-400 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-300"
-                  onClick={() => void onConfirm(selectedEvent.confirmationId!, true)}
+                  disabled={selectedEvent.confirmation.status !== "pending"}
+                  onClick={() =>
+                    void onConfirm(selectedEvent.confirmation!.confirmationId, true)
+                  }
                   type="button"
                 >
                   确认
                 </button>
                 <button
                   className="min-h-10 cursor-pointer rounded-md border border-white/10 px-3 text-sm font-black text-slate-300 transition-colors duration-200 hover:bg-white/8 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-slate-100"
-                  onClick={() => void onConfirm(selectedEvent.confirmationId!, false)}
+                  disabled={selectedEvent.confirmation.status !== "pending"}
+                  onClick={() =>
+                    void onConfirm(selectedEvent.confirmation!.confirmationId, false)
+                  }
                   type="button"
                 >
                   取消

@@ -1,14 +1,16 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AgentEventStream, stripTtsControlBlocks } from "./AgentEventStream";
-import type { AgentEvent } from "../hooks/useAgentEvents";
+import type { AgentTimelineItem } from "../hooks/useAgentStream";
 
-function event(overrides: Partial<AgentEvent>): AgentEvent {
+function event(overrides: Partial<AgentTimelineItem>): AgentTimelineItem {
   return {
     id: "event-1",
     kind: "status",
+    sequence: 1,
     content: "content",
     createdAt: 1,
+    updatedAt: 1,
     ...overrides,
   };
 }
@@ -47,7 +49,7 @@ describe("AgentEventStream", () => {
       <AgentEventStream
         events={[
           event({
-            kind: "result",
+            kind: "message",
             content: "完成了。\n<tts>我处理好了。</tts>\n改动见上方。",
           }),
         ]}
@@ -66,7 +68,7 @@ describe("AgentEventStream", () => {
       <AgentEventStream
         events={[
           event({
-            kind: "result",
+            kind: "message",
             content: "A <tts>one</tts> B <tts>two</tts> C",
           }),
         ]}
@@ -84,7 +86,7 @@ describe("AgentEventStream", () => {
       <AgentEventStream
         events={[
           event({
-            kind: "result",
+            kind: "message",
             content: "正文 <tts>未完成",
           }),
         ]}
@@ -159,7 +161,6 @@ describe("AgentEventStream", () => {
         events={[
           event({
             kind: "thinking",
-            operation: "append",
             content: "I am thinking",
           }),
         ]}
@@ -176,7 +177,7 @@ describe("AgentEventStream", () => {
       <AgentEventStream
         events={[
           event({
-            kind: "result",
+            kind: "message",
             title: "Answer",
             content: "Detailed response",
           }),
@@ -196,10 +197,13 @@ describe("AgentEventStream", () => {
       <AgentEventStream
         events={[
           event({
-            kind: "confirm",
+            kind: "confirmation",
             content: "Apply these changes?",
-            confirmationId: "confirm-1",
-            confirmStatus: "pending",
+            confirmation: {
+              confirmationId: "confirm-1",
+              status: "pending",
+              content: "Apply these changes?",
+            },
           }),
         ]}
         expanded={false}

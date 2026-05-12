@@ -16,6 +16,7 @@ use super::client::{
 };
 use super::events::{AgentEvent, AgentStatus};
 use super::profile::AgentProfile;
+use super::timeline::AgentStreamRuntime;
 use super::transport::spawn_sdk_transport;
 use crate::tts::{agent_tts_readiness, AgentTtsReadiness};
 
@@ -32,6 +33,12 @@ struct PromptCommand {
 
 type ReadySender = oneshot::Sender<Result<(String, mpsc::UnboundedSender<PromptCommand>), String>>;
 
+struct SdkConnectionRuntime {
+    pending_permissions: PendingPermissions,
+    result_tracker: AgentResultTracker,
+    stream_runtime: AgentStreamRuntime,
+}
+
 struct ActiveAgent {
     profile: AgentProfile,
     session_id: String,
@@ -46,9 +53,14 @@ pub struct AcpRuntime {
     active: Arc<Mutex<Option<ActiveAgent>>>,
     pending_permissions: PendingPermissions,
     result_tracker: AgentResultTracker,
+    stream_runtime: AgentStreamRuntime,
 }
 
 impl AcpRuntime {
+    pub fn stream_runtime(&self) -> AgentStreamRuntime {
+        self.stream_runtime.clone()
+    }
+
     pub fn status(&self) -> AgentStatus {
         self.active
             .lock()
@@ -86,6 +98,7 @@ impl AcpRuntime {
         let active = self.active.clone();
         let pending_permissions = self.pending_permissions.clone();
         let result_tracker = self.result_tracker.clone();
+        let stream_runtime = self.stream_runtime.clone();
         let profile_for_task = profile.clone();
         let app_for_task = app.clone();
         let child_for_task = child.clone();
@@ -95,8 +108,11 @@ impl AcpRuntime {
                 app_for_task.clone(),
                 profile_for_task.clone(),
                 transport,
-                pending_permissions,
-                result_tracker,
+                SdkConnectionRuntime {
+                    pending_permissions,
+                    result_tracker,
+                    stream_runtime,
+                },
                 ready_tx,
                 shutdown_rx,
             )
@@ -122,6 +138,8 @@ impl AcpRuntime {
         let (session_id, prompt_tx) = ready_rx
             .await
             .map_err(|_| "ACP agent connection closed before session was ready".to_string())??;
+        self.stream_runtime
+            .reset_session(Some(&app), Some(session_id.clone()));
 
         {
             let mut active = self.active.lock();
@@ -161,6 +179,7 @@ impl AcpRuntime {
             active.task.abort();
         }
         self.pending_permissions.lock().clear();
+        self.stream_runtime.reset_session(Some(&app), None);
 
         let status = AgentStatus::disconnected();
         emit_agent_status(&app, status.clone());
@@ -216,13 +235,16 @@ async fn run_sdk_connection(
     app: AppHandle,
     profile: AgentProfile,
     transport: super::transport::SdkTransport,
-    pending_permissions: PendingPermissions,
-    result_tracker: AgentResultTracker,
+    runtime: SdkConnectionRuntime,
     ready_tx: ReadySender,
     shutdown_rx: oneshot::Receiver<()>,
 ) -> Result<(), String> {
-    let client =
-        VoiceCodingAcpClient::new(app.clone(), pending_permissions, result_tracker.clone());
+    let client = VoiceCodingAcpClient::new(
+        app.clone(),
+        runtime.pending_permissions,
+        runtime.result_tracker.clone(),
+        runtime.stream_runtime,
+    );
     let notification_client = client.clone();
     let permission_client = client.clone();
     let unsupported_app = app.clone();
@@ -333,7 +355,8 @@ async fn run_sdk_connection(
                     let _ = tx.send(Ok((session_id, prompt_tx)));
                 }
 
-                run_prompt_worker(app, result_tracker, session, prompt_rx, shutdown_rx).await
+                run_prompt_worker(app, runtime.result_tracker, session, prompt_rx, shutdown_rx)
+                    .await
             }
         })
         .await;

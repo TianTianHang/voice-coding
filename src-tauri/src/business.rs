@@ -489,6 +489,9 @@ impl BusinessRuntime {
             inner.turns.insert(turn_id.clone(), running.clone());
             inner.active_turn_id = Some(turn_id.clone());
         }
+        app.state::<crate::acp::AcpRuntime>()
+            .stream_runtime()
+            .begin_turn(Some(&app), turn_id.clone());
         emit_agent_turn_changed(&app, &running);
 
         let runtime = app.state::<crate::acp::AcpRuntime>();
@@ -518,6 +521,7 @@ impl BusinessRuntime {
             }
             snapshot
         };
+        runtime.stream_runtime().finish_turn(&turn_id);
         emit_agent_turn_changed(&app, &completed);
 
         if let Err(err) = result {
@@ -926,6 +930,9 @@ pub fn cancel_agent_turn(
         turn.updated_at = current_millis();
         turn.clone()
     };
+    app.state::<crate::acp::AcpRuntime>()
+        .stream_runtime()
+        .finish_turn(&turn_id);
     emit_agent_turn_changed(&app, &status);
     Ok(status)
 }
