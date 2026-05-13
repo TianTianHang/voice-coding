@@ -4,9 +4,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use ndarray::{s, Array1, Array2, Array3, ArrayD, IxDyn};
+use ndarray::{s, Array1, Array2, Array3, ArrayViewD, IxDyn};
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::session::SessionInputValue;
@@ -55,7 +55,7 @@ mod tests {
 
         assert!(assets.manifest_path.ends_with(MANIFEST_FILE));
         assert!(assets.tts_files.contains_key("prefill"));
-        assert!(assets.codec_files.contains_key("decode_full"));
+        assert!(assets.codec_files.contains_key("decode_step"));
     }
 
     #[test]
@@ -134,11 +134,11 @@ mod tests {
 
     #[test]
     fn parses_moss_tts_intra_threads() {
-        assert_eq!(parse_moss_tts_intra_threads("1"), Some(1));
-        assert_eq!(parse_moss_tts_intra_threads(" 4 "), Some(4));
-        assert_eq!(parse_moss_tts_intra_threads("0"), None);
-        assert_eq!(parse_moss_tts_intra_threads(""), None);
-        assert_eq!(parse_moss_tts_intra_threads("many"), None);
+        assert_eq!(parse_moss_tts_threads("1"), Some(1));
+        assert_eq!(parse_moss_tts_threads(" 4 "), Some(4));
+        assert_eq!(parse_moss_tts_threads("0"), None);
+        assert_eq!(parse_moss_tts_threads(""), None);
+        assert_eq!(parse_moss_tts_threads("many"), None);
     }
 
     #[test]
@@ -159,17 +159,10 @@ mod tests {
     }
 
     #[test]
-    fn sampling_mode_accepts_fixed_and_greedy() {
+    fn sampling_mode_accepts_only_fixed() {
         let fixed = TtsConfig {
             moss: Some(MossTtsConfig {
                 sampling_mode: Some("fixed".to_string()),
-                ..MossTtsConfig::default()
-            }),
-            ..TtsConfig::default()
-        };
-        let greedy = TtsConfig {
-            moss: Some(MossTtsConfig {
-                sampling_mode: Some("Greedy".to_string()),
                 ..MossTtsConfig::default()
             }),
             ..TtsConfig::default()
@@ -178,10 +171,6 @@ mod tests {
         assert_eq!(
             MossSamplingMode::from_config(&fixed).unwrap(),
             MossSamplingMode::Fixed
-        );
-        assert_eq!(
-            MossSamplingMode::from_config(&greedy).unwrap(),
-            MossSamplingMode::Greedy
         );
     }
 
@@ -200,25 +189,6 @@ mod tests {
         assert!(matches!(err, MossTtsError::UnknownSamplingMode { .. }));
         assert!(err.to_string().contains("creative"));
         assert!(err.to_string().contains("fixed"));
-        assert!(err.to_string().contains("greedy"));
-    }
-
-    #[test]
-    fn greedy_frame_selects_deterministic_argmax_per_codebook() {
-        let logits = vec![0.1, 0.7, 0.2, 4.0, -1.0, 3.0];
-
-        let first = greedy_frame_from_logits(&logits, 2, 3).unwrap();
-        let second = greedy_frame_from_logits(&logits, 2, 3).unwrap();
-
-        assert_eq!(first, vec![1, 0]);
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn greedy_frame_rejects_unexpected_logits_shape() {
-        let err = greedy_frame_from_logits(&[0.0, 1.0], 2, 3).unwrap_err();
-
-        assert!(err.to_string().contains("expected 6 logits"));
     }
 
     #[test]
@@ -399,7 +369,7 @@ mod tests {
             },
         );
 
-        state.update_from_owned_outputs(&outputs).unwrap();
+        state.update_from_owned_outputs(&mut outputs).unwrap();
 
         assert_eq!(state.transformer_offsets[0].data, vec![3]);
         assert_eq!(state.attention_caches[0].offset.data, vec![4]);
@@ -416,9 +386,8 @@ mod tests {
         .unwrap();
         let mut state = CodecDecodeStepState::from_meta(&assets.codec_meta).unwrap();
 
-        let err = state
-            .update_from_owned_outputs(&HashMap::new())
-            .unwrap_err();
+        let mut outputs = HashMap::new();
+        let err = state.update_from_owned_outputs(&mut outputs).unwrap_err();
 
         assert!(err.to_string().contains("codec_decode_step"));
         assert!(err.to_string().contains("transformer_offset_out_0"));
@@ -432,8 +401,15 @@ mod tests {
     }
 
     #[test]
-    fn full_codec_decode_is_the_default_output_path() {
-        const { assert!(!USE_CODEC_DECODE_STEP_BY_DEFAULT) };
+    fn streaming_codec_decode_is_the_only_output_path() {
+        let fixture = MossFixture::new();
+        let assets = MossAssets::load(MossModelConfig {
+            model_dir: fixture.tts_dir,
+        })
+        .unwrap();
+
+        assert!(assets.codec_files.contains_key("decode_step"));
+        assert!(!assets.codec_files.contains_key("decode_full"));
     }
 
     #[test]
@@ -847,8 +823,6 @@ mod tests {
                 "tokenizer.model",
                 "prefill.onnx",
                 "decode_step.onnx",
-                "local_decoder.onnx",
-                "local_cached_step.onnx",
                 "local_fixed_sampled_frame.onnx",
                 "tts_shared.data",
             ] {
@@ -856,7 +830,6 @@ mod tests {
             }
             for file in [
                 "encode.onnx",
-                "decode_full.onnx",
                 "decode_step.onnx",
                 "codec_shared.data",
             ] {
@@ -921,8 +894,6 @@ mod tests {
   "files": {
     "prefill": "prefill.onnx",
     "decode_step": "decode_step.onnx",
-    "local_decoder": "local_decoder.onnx",
-    "local_cached_step": "local_cached_step.onnx",
     "local_fixed_sampled_frame": "local_fixed_sampled_frame.onnx"
   },
   "external_data_files": {
@@ -1030,10 +1001,9 @@ mod tests {
                 format!(
                     r#"{{
   "format_version": 2,
-  "files": {{ "encode": "encode.onnx", "decode_full": "decode_full.onnx", "decode_step": "decode_step.onnx" }},
+  "files": {{ "encode": "encode.onnx", "decode_step": "decode_step.onnx" }},
   "external_data_files": {{
     "encode.onnx": ["codec_shared.data"],
-    "decode_full.onnx": ["codec_shared.data"],
     "decode_step.onnx": ["codec_shared.data"]
   }},
   "codec_config": {{ "sample_rate": {sample_rate}, "channels": {channels}, "num_quantizers": {num_quantizers} }},

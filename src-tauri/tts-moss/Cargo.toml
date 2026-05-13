@@ -16,6 +16,7 @@ sentencepiece = "0.13.1"
 hound = "3.5.1"
 symphonia = { version = "0.5", features = ["all"] }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
+log = "0.4.29"
 
 [dev-dependencies]
 tempfile = "3.27.0"

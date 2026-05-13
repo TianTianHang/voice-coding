@@ -1,7 +1,6 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MossSamplingMode {
     Fixed,
-    Greedy,
 }
 
 impl MossSamplingMode {
@@ -18,7 +17,6 @@ impl MossSamplingMode {
 
         match mode.to_ascii_lowercase().as_str() {
             "fixed" => Ok(Self::Fixed),
-            "greedy" => Ok(Self::Greedy),
             _ => Err(MossTtsError::UnknownSamplingMode {
                 mode: mode.to_string(),
             }),

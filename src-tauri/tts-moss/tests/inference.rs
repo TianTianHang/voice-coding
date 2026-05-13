@@ -47,6 +47,10 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(240);
+    let seed = std::env::var("MOSS_TTS_PERF_SEED")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(42);
     let warmup_text =
         std::env::var("MOSS_TTS_PERF_WARMUP_TEXT").unwrap_or_else(|_| "预热。".to_string());
 
@@ -60,7 +64,7 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
     let warmup_result = engine
         .synthesize_stream_events(
             &warmup_text,
-            perf_config(chunk_ms),
+            perf_config(chunk_ms, seed),
             Box::new(|_| {}),
         )
         .await
@@ -81,7 +85,7 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
     let result = engine
         .synthesize_stream_events(
             &text,
-            perf_config(chunk_ms),
+            perf_config(chunk_ms, seed),
             Box::new(|event| {
                 if let TtsSynthesisEvent::AudioChunk(_) = event {
                     chunk_count += 1;
@@ -103,12 +107,17 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
     assert!(chunk_count > 0, "streaming synthesis should emit audio chunks");
 
     let audio_duration_sec = audio_duration_sec(&result);
+    assert!(
+        audio_duration_sec.is_finite() && audio_duration_sec > 0.0,
+        "synthesized audio duration must be positive, got {audio_duration_sec}"
+    );
     let elapsed_sec = elapsed.as_secs_f64();
     let rtf = elapsed_sec / audio_duration_sec;
     eprintln!(
-        "streaming realtime perf: text_chars={} chunk_ms={} chunks={} first_audio={:?} elapsed={:.3}s audio={:.3}s rtf={:.3} max_rtf={:.3}",
+        "streaming realtime perf: text_chars={} chunk_ms={} seed={} chunks={} first_audio={:?} elapsed={:.3}s audio={:.3}s rtf={:.3} max_rtf={:.3}",
         text.chars().count(),
         chunk_ms,
+        seed,
         chunk_count,
         first_audio_elapsed,
         elapsed_sec,
@@ -123,14 +132,15 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
     );
 }
 
-fn perf_config(chunk_ms: u32) -> TtsConfig {
+fn perf_config(chunk_ms: u32, seed: u64) -> TtsConfig {
     TtsConfig {
         stream: Some(TtsStreamConfig {
             audio_chunk_ms: Some(chunk_ms),
             ..TtsStreamConfig::default()
         }),
         moss: Some(MossTtsConfig {
-            sampling_mode: Some("greedy".to_string()),
+            sampling_mode: Some("fixed".to_string()),
+            seed: Some(seed),
             ..MossTtsConfig::default()
         }),
         ..TtsConfig::default()
@@ -141,9 +151,22 @@ fn audio_duration_sec(result: &tts_core::TtsResult) -> f64 {
     result.audio.pcm.len_frames(result.audio.channels) as f64 / result.audio.sample_rate_hz as f64
 }
 
+#[test]
+fn audio_duration_sec_counts_pcm_frames_not_interleaved_samples() {
+    let result = tts_core::TtsResult {
+        audio: tts_core::AudioBuffer {
+            sample_rate_hz: 48_000,
+            channels: 2,
+            pcm: PcmData::F32(vec![0.0; 96_000]),
+        },
+    };
+
+    assert_eq!(audio_duration_sec(&result), 1.0);
+}
+
 #[tokio::test]
 #[ignore = "requires downloaded MOSS ONNX model assets and validates streaming codec decode"]
-async fn synthesizes_playback_ready_audio_with_greedy_streaming_decode() {
+async fn synthesizes_playback_ready_audio_with_fixed_streaming_decode() {
     let model_dir = std::env::var("MOSS_TTS_MODEL_DIR")
         .expect("set MOSS_TTS_MODEL_DIR to MOSS-TTS-Nano-100M-ONNX before running this test");
     eprintln!("MOSS_TTS_MODEL_DIR={model_dir}");
@@ -159,14 +182,14 @@ async fn synthesizes_playback_ready_audio_with_greedy_streaming_decode() {
             "Streaming decode test.",
             TtsConfig {
                 moss: Some(MossTtsConfig {
-                    sampling_mode: Some("greedy".to_string()),
+                    sampling_mode: Some("fixed".to_string()),
                     ..MossTtsConfig::default()
                 }),
                 ..TtsConfig::default()
             },
         )
         .await
-        .expect("MOSS greedy synthesis with streaming decode should succeed or fallback cleanly");
+        .expect("MOSS fixed synthesis with streaming decode should succeed");
 
     result
         .validate_for_playback()
@@ -174,11 +197,11 @@ async fn synthesizes_playback_ready_audio_with_greedy_streaming_decode() {
     assert_eq!(result.audio.sample_rate_hz, PLAYBACK_SAMPLE_RATE_HZ);
     assert_eq!(result.audio.channels, PLAYBACK_CHANNELS);
     let duration_sec = audio_duration_sec(&result);
-    eprintln!("greedy streaming decode audio duration: {duration_sec:.3}s");
+    eprintln!("fixed streaming decode audio duration: {duration_sec:.3}s");
     assert!(result.audio.pcm.len_frames(result.audio.channels) > 0);
     assert!(
         duration_sec < 10.0,
-        "short greedy synthesis should stop before max_new_frames duration, got {duration_sec:.3}s"
+        "short fixed synthesis should stop before max_new_frames duration, got {duration_sec:.3}s"
     );
 }
 

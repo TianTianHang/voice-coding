@@ -4,13 +4,8 @@ struct MossSessions {
     #[allow(dead_code)]
     decode_step: Session,
     #[allow(dead_code)]
-    local_decoder: Session,
-    #[allow(dead_code)]
-    local_cached_step: Session,
-    #[allow(dead_code)]
     local_fixed_sampled_frame: Session,
     codec_encode: Session,
-    codec_decode_full: Session,
     #[allow(dead_code)]
     codec_decode_step: Session,
     codec_decode_step_state: CodecDecodeStepState,
@@ -20,15 +15,9 @@ impl MossSessions {
     fn load(assets: &MossAssets) -> Result<Self, MossTtsError> {
         let prefill = create_session(required_file(&assets.tts_files, "prefill")?, "tts.prefill")?;
         let decode_step = create_session(required_file(&assets.tts_files, "decode_step")?, "tts.decode_step")?;
-        let local_decoder = create_session(required_file(&assets.tts_files, "local_decoder")?, "tts.local_decoder")?;
-        let local_cached_step = create_session(required_file(&assets.tts_files, "local_cached_step")?, "tts.local_cached_step")?;
         let local_fixed_sampled_frame = create_session(
             required_file(&assets.tts_files, "local_fixed_sampled_frame")?,
             "tts.local_fixed_sampled_frame",
-        )?;
-        let codec_decode_full = create_session(
-            required_file(&assets.codec_files, "decode_full")?,
-            "codec.decode_full",
         )?;
         let codec_encode = create_session(
             required_file(&assets.codec_files, "encode")?,
@@ -52,18 +41,6 @@ impl MossSessions {
             assets.tts_meta.onnx.decode_output_names.iter(),
         )?;
         validate_session_io(
-            &local_decoder,
-            "tts.local_decoder",
-            &["global_hidden", "text_token_id", "audio_prefix_token_ids"],
-            &["text_logits", "audio_logits"],
-        )?;
-        validate_session_io(
-            &local_cached_step,
-            "tts.local_cached_step",
-            assets.tts_meta.onnx.local_cached_input_names.iter(),
-            assets.tts_meta.onnx.local_cached_output_names.iter(),
-        )?;
-        validate_session_io(
             &local_fixed_sampled_frame,
             "tts.local_fixed_sampled_frame",
             &[
@@ -81,12 +58,6 @@ impl MossSessions {
             assets.codec_meta.onnx.encode_output_names.iter(),
         )?;
         validate_session_io(
-            &codec_decode_full,
-            "codec.decode_full",
-            assets.codec_meta.onnx.decode_input_names.iter(),
-            assets.codec_meta.onnx.decode_output_names.iter(),
-        )?;
-        validate_session_io(
             &codec_decode_step,
             "codec.decode_step",
             assets.codec_meta.onnx.decode_step_input_names.iter(),
@@ -97,14 +68,22 @@ impl MossSessions {
         Ok(Self {
             prefill,
             decode_step,
-            local_decoder,
-            local_cached_step,
             local_fixed_sampled_frame,
             codec_encode,
-            codec_decode_full,
             codec_decode_step,
             codec_decode_step_state,
         })
+    }
+
+    fn end_ort_profiling(&mut self) {
+        end_session_profiling(&mut self.prefill, "tts.prefill");
+        end_session_profiling(&mut self.decode_step, "tts.decode_step");
+        end_session_profiling(
+            &mut self.local_fixed_sampled_frame,
+            "tts.local_fixed_sampled_frame",
+        );
+        end_session_profiling(&mut self.codec_encode, "codec.encode");
+        end_session_profiling(&mut self.codec_decode_step, "codec.decode_step");
     }
 
     fn encode_reference_audio(
@@ -140,19 +119,38 @@ impl MossSessions {
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
-        sampling_mode: MossSamplingMode,
+        _sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
     ) -> Result<TtsResult, MossTtsError> {
-        let generated_frames =
-            self.generate_audio_frames(assets, request, sampling_mode, generation_config)?;
-        self.decode_generated_frames(generated_frames)
+        let total_started = Instant::now();
+        let generated_frames = self.generate_audio_frames(assets, request, generation_config)?;
+        let frame_count = generated_frames.len();
+        let decode_started = Instant::now();
+        let result = self.decode_step_buffered(&generated_frames);
+        trace_moss_stage(
+            "codec_decode_step_buffered",
+            decode_started,
+            format_args!("frames={frame_count}"),
+        );
+        let result = result?;
+        trace_moss_stage(
+            "synthesize_total",
+            total_started,
+            format_args!(
+                "frames={} pcm_samples={}",
+                frame_count,
+                pcm_sample_count(&result.audio.pcm)
+            ),
+        );
+        self.end_ort_profiling();
+        Ok(result)
     }
 
     fn synthesize_streaming_frames<F>(
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
-        sampling_mode: MossSamplingMode,
+        _sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
         requested_chunk_ms: Option<u32>,
         mut on_pcm_chunk: F,
@@ -164,17 +162,23 @@ impl MossSessions {
         let mut pending_frames: Vec<Vec<i64>> = Vec::new();
         let mut budget = FrameBudget::new(state.batch_size, requested_chunk_ms);
         let mut buffer = PcmChunkBuffer::default();
+        let total_started = Instant::now();
 
         self.generate_audio_frames_with_callback(
             assets,
             request,
-            sampling_mode,
             generation_config,
             |sessions, frame| {
                 pending_frames.push(frame.to_vec());
                 if pending_frames.len() >= budget.next_batch_size(false) {
                     let frames = std::mem::take(&mut pending_frames);
+                    let decode_started = Instant::now();
                     let chunk = sessions.run_codec_decode_step_batch(&frames, &mut state)?;
+                    trace_moss_stage(
+                        "codec_decode_step_stream_batch",
+                        decode_started,
+                        format_args!("frames={} pcm_samples={}", frames.len(), chunk.len()),
+                    );
                     budget.record_pcm_samples(chunk.len());
                     on_pcm_chunk(chunk.clone(), false)?;
                     buffer.push_chunk(chunk);
@@ -187,27 +191,26 @@ impl MossSessions {
             let take = budget.next_batch_size(true).min(pending_frames.len());
             let frames = pending_frames.drain(..take).collect::<Vec<_>>();
             let is_final = pending_frames.is_empty();
+            let decode_started = Instant::now();
             let chunk = self.run_codec_decode_step_batch(&frames, &mut state)?;
+            trace_moss_stage(
+                "codec_decode_step_stream_batch",
+                decode_started,
+                format_args!("frames={} pcm_samples={} final={is_final}", frames.len(), chunk.len()),
+            );
             budget.record_pcm_samples(chunk.len());
             on_pcm_chunk(chunk.clone(), is_final)?;
             buffer.push_chunk(chunk);
         }
 
-        buffer.into_tts_result()
-    }
-
-    fn decode_generated_frames(
-        &mut self,
-        generated_frames: Vec<Vec<i64>>,
-    ) -> Result<TtsResult, MossTtsError> {
-        if USE_CODEC_DECODE_STEP_BY_DEFAULT {
-            match self.decode_step_buffered(&generated_frames) {
-                Ok(result) => Ok(result),
-                Err(_) => self.decode_full(generated_frames),
-            }
-        } else {
-            self.decode_full(generated_frames)
-        }
+        let result = buffer.into_tts_result()?;
+        trace_moss_stage(
+            "synthesize_streaming_total",
+            total_started,
+            format_args!("pcm_samples={}", pcm_sample_count(&result.audio.pcm)),
+        );
+        self.end_ort_profiling();
+        Ok(result)
     }
 
     fn decode_step_buffered(
@@ -257,7 +260,7 @@ impl MossSessions {
 
         let mut i32_state_tensors = Vec::new();
         let mut f32_state_tensors = Vec::new();
-        state.collect_input_arrays(&mut i32_state_tensors, &mut f32_state_tensors)?;
+        state.collect_input_views(&mut i32_state_tensors, &mut f32_state_tensors)?;
 
         let mut inputs = ort::inputs![
             "audio_codes" => TensorRef::from_array_view(codes.view()).map_err(|e| MossTtsError::Inference { stage: "codec_decode_step", detail: e.to_string() })?,
@@ -298,8 +301,8 @@ impl MossSessions {
                 detail: e.to_string(),
             })?;
         let audio = extract_codec_audio_chunk(&outputs, "codec_decode_step")?;
-        let owned_state_outputs = collect_codec_decode_state_outputs(&outputs, state)?;
-        state.update_from_owned_outputs(&owned_state_outputs)?;
+        let mut owned_state_outputs = collect_codec_decode_state_outputs(&outputs, state)?;
+        state.update_from_owned_outputs(&mut owned_state_outputs)?;
         Ok(audio)
     }
 
@@ -307,13 +310,11 @@ impl MossSessions {
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
-        sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
     ) -> Result<Vec<Vec<i64>>, MossTtsError> {
         self.generate_audio_frames_with_callback(
             assets,
             request,
-            sampling_mode,
             generation_config,
             |_sessions, _frame| Ok(()),
         )
@@ -323,7 +324,6 @@ impl MossSessions {
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
-        sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
         mut on_frame: F,
     ) -> Result<Vec<Vec<i64>>, MossTtsError>
@@ -357,6 +357,7 @@ impl MossSessions {
                 detail: e.to_string(),
             })?;
 
+        let prefill_started = Instant::now();
         let mut outputs = self
             .prefill
             .run(ort::inputs![
@@ -367,6 +368,11 @@ impl MossSessions {
                 stage: "tts_prefill",
                 detail: e.to_string(),
             })?;
+        trace_moss_stage(
+            "tts_prefill",
+            prefill_started,
+            format_args!("rows={} row_width={row_width}", request.rows.len()),
+        );
 
         let mut global_hidden = take_last_hidden_output(&mut outputs, "global_hidden", "tts_prefill")?;
         let mut decode_past = take_decode_present_outputs(&mut outputs, assets, "tts_prefill")?;
@@ -374,42 +380,45 @@ impl MossSessions {
         drop(outputs);
 
         let mut frames = Vec::new();
-        let mut previous_token_sets = vec![vec![false; assets.audio_codebook_size()]; assets.n_vq()];
+        let n_vq = assets.n_vq();
+        let codebook_size = assets.audio_codebook_size();
+        let mut repetition_seen_mask = vec![0i32; n_vq * codebook_size];
         let mut rng = SimpleRng::from_optional_seed(generation_config.seed);
         let max_new_frames = generation_config.frame_limit(assets);
 
         for past_valid_length in (initial_past_valid_length..).take(max_new_frames) {
-            let fixed = match sampling_mode {
-                MossSamplingMode::Fixed => {
-                    self.run_local_fixed_sampled_frame(
-                        &global_hidden,
-                        &previous_token_sets,
-                        &mut rng,
-                        assets,
-                    )?
-                }
-                MossSamplingMode::Greedy => {
-                    self.run_local_cached_sampled_frame(
-                        &global_hidden,
-                        &previous_token_sets,
-                        &mut rng,
-                        assets,
-                    )?
-                }
-            };
+            let fixed_started = Instant::now();
+            let fixed = self.run_local_fixed_sampled_frame(
+                &global_hidden,
+                &repetition_seen_mask,
+                &mut rng,
+                assets,
+            )?;
+            trace_moss_stage(
+                "tts_local_fixed_sampled_frame",
+                fixed_started,
+                format_args!("generated_frames={}", frames.len()),
+            );
             if !fixed.should_continue {
                 break;
             }
             for (channel, token) in fixed.frame.iter().enumerate() {
-                if let Some(seen) = previous_token_sets
-                    .get_mut(channel)
-                    .and_then(|row| row.get_mut(*token as usize))
-                {
-                    *seen = true;
+                if let Ok(token) = usize::try_from(*token) {
+                    if let Some(seen) =
+                        repetition_seen_mask.get_mut(channel * codebook_size + token)
+                    {
+                        *seen = 1;
+                    }
                 }
             }
             let frame = fixed.frame;
+            let decode_started = Instant::now();
             let mut decode_outputs = self.run_decode_step(&frame, past_valid_length, decode_past, assets)?;
+            trace_moss_stage(
+                "tts_decode_step",
+                decode_started,
+                format_args!("past_valid_length={past_valid_length}"),
+            );
             global_hidden = take_last_hidden_output(&mut decode_outputs, "global_hidden", "tts_decode_step")?;
             decode_past = take_decode_present_outputs(&mut decode_outputs, assets, "tts_decode_step")?;
             drop(decode_outputs);
@@ -429,21 +438,26 @@ impl MossSessions {
     fn run_local_fixed_sampled_frame(
         &mut self,
         global_hidden: &DynValue,
-        previous_token_sets: &[Vec<bool>],
+        repetition_seen_mask_data: &[i32],
         rng: &mut SimpleRng,
         assets: &MossAssets,
     ) -> Result<GeneratedFrame, MossTtsError> {
         let n_vq = assets.n_vq();
         let codebook_size = assets.audio_codebook_size();
-        let mut seen = vec![0i32; n_vq * codebook_size];
-        for (channel, tokens) in previous_token_sets.iter().enumerate() {
-            for (token, token_seen) in tokens.iter().enumerate() {
-                if *token_seen {
-                    seen[channel * codebook_size + token] = 1;
-                }
-            }
+        let expected_mask_len = n_vq * codebook_size;
+        if repetition_seen_mask_data.len() != expected_mask_len {
+            return Err(MossTtsError::Inference {
+                stage: "tts_local_fixed_sampled_frame",
+                detail: format!(
+                    "expected repetition mask length {expected_mask_len}, got {}",
+                    repetition_seen_mask_data.len()
+                ),
+            });
         }
-        let repetition_seen_mask = Array3::from_shape_vec((1, n_vq, codebook_size), seen)
+        let repetition_seen_mask = ArrayViewD::from_shape(
+            IxDyn(&[1, n_vq, codebook_size]),
+            repetition_seen_mask_data,
+        )
             .map_err(|e| MossTtsError::Inference {
                 stage: "tts_local_fixed_sampled_frame",
                 detail: e.to_string(),
@@ -476,151 +490,6 @@ impl MossSessions {
             });
         }
         Ok(GeneratedFrame { should_continue, frame })
-    }
-
-    fn run_local_cached_sampled_frame(
-        &mut self,
-        global_hidden: &DynValue,
-        previous_token_sets: &[Vec<bool>],
-        rng: &mut SimpleRng,
-        assets: &MossAssets,
-    ) -> Result<GeneratedFrame, MossTtsError> {
-        let assistant_slot = assets.manifest.tts_config.audio_assistant_slot_token_id;
-        let defaults = &assets.manifest.generation_defaults;
-        let first = self.run_local_cached_step(
-            global_hidden,
-            LocalCachedStepRequest {
-                text_token_id: 0,
-                audio_token_id: 0,
-                channel_index: 0,
-                step_type: LocalStepType::Text,
-                local_past: None,
-                past_valid_length: 0,
-            },
-            assets,
-        )?;
-        let text_token = sample_token_from_logits(
-            &first.text_logits,
-            defaults.text_temperature,
-            defaults.text_top_p,
-            defaults.text_top_k,
-            rng,
-            "tts_local_cached_step",
-        )?;
-        if text_token != assistant_slot {
-            return Ok(GeneratedFrame {
-                should_continue: false,
-                frame: Vec::new(),
-            });
-        }
-
-        let mut frame = Vec::with_capacity(assets.n_vq());
-        let first_audio_step = self.run_local_cached_step(
-            global_hidden,
-            LocalCachedStepRequest {
-                text_token_id: text_token,
-                audio_token_id: 0,
-                channel_index: 0,
-                step_type: LocalStepType::FirstAudio,
-                local_past: Some(first.local_present),
-                past_valid_length: 1,
-            },
-            assets,
-        )?;
-        let first_channel_logits = channel_logits(&first_audio_step.audio_logits, 0, assets)?;
-        let first_audio_logits = apply_repetition_penalty(
-            first_channel_logits,
-            previous_token_sets.first().map(Vec::as_slice),
-            defaults.audio_repetition_penalty,
-        );
-        let first_audio_token = sample_token_from_logits(
-            &first_audio_logits,
-            defaults.audio_temperature,
-            defaults.audio_top_p,
-            defaults.audio_top_k,
-            rng,
-            "tts_local_cached_step",
-        )?;
-        frame.push(first_audio_token);
-        let mut local_past = first_audio_step.local_present;
-        for (local_past_valid_length, channel_index) in (2..).zip(1..assets.n_vq()) {
-            let previous_audio_token = *frame.last().ok_or_else(|| MossTtsError::Inference {
-                stage: "tts_local_greedy",
-                detail: "missing previous audio token".to_string(),
-            })?;
-            let step = self.run_local_cached_step(
-                global_hidden,
-                LocalCachedStepRequest {
-                    text_token_id: 0,
-                    audio_token_id: previous_audio_token,
-                    channel_index: channel_index - 1,
-                    step_type: LocalStepType::Audio,
-                    local_past: Some(local_past),
-                    past_valid_length: local_past_valid_length,
-                },
-                assets,
-            )?;
-            let channel_logits = channel_logits(&step.audio_logits, channel_index, assets)?;
-            let audio_logits = apply_repetition_penalty(
-                channel_logits,
-                previous_token_sets.get(channel_index).map(Vec::as_slice),
-                defaults.audio_repetition_penalty,
-            );
-            frame.push(sample_token_from_logits(
-                &audio_logits,
-                defaults.audio_temperature,
-                defaults.audio_top_p,
-                defaults.audio_top_k,
-                rng,
-                "tts_local_cached_step",
-            )?);
-            local_past = step.local_present;
-        }
-        Ok(GeneratedFrame {
-            should_continue: true,
-            frame,
-        })
-    }
-
-    fn run_local_cached_step(
-        &mut self,
-        global_hidden: &DynValue,
-        request: LocalCachedStepRequest,
-        assets: &MossAssets,
-    ) -> Result<LocalCachedStepOutput, MossTtsError> {
-        let text_token_id = Array1::from_vec(vec![to_i32(request.text_token_id)?]);
-        let audio_token_id = Array1::from_vec(vec![to_i32(request.audio_token_id)?]);
-        let channel_index = Array1::from_vec(vec![to_i32(request.channel_index as i64)?]);
-        let step_type = Array1::from_vec(vec![request.step_type.as_i32()]);
-        let past_valid_lengths = Array1::from_vec(vec![to_i32(request.past_valid_length)?]);
-        let local_past = match request.local_past {
-            Some(local_past) => local_past,
-            None => create_empty_local_past(assets)?,
-        };
-
-        let mut inputs = ort::inputs![
-            "global_hidden" => global_hidden,
-            "text_token_id" => TensorRef::from_array_view(text_token_id.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_cached_step", detail: e.to_string() })?,
-            "audio_token_id" => TensorRef::from_array_view(audio_token_id.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_cached_step", detail: e.to_string() })?,
-            "channel_index" => TensorRef::from_array_view(channel_index.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_cached_step", detail: e.to_string() })?,
-            "step_type" => TensorRef::from_array_view(step_type.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_cached_step", detail: e.to_string() })?,
-            "past_valid_lengths" => TensorRef::from_array_view(past_valid_lengths.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_cached_step", detail: e.to_string() })?
-        ];
-        for (name, value) in local_past {
-            inputs.push((name.into(), SessionInputValue::from(value)));
-        }
-        let mut outputs = self.local_cached_step.run(inputs).map_err(|e| MossTtsError::Inference {
-            stage: "tts_local_cached_step",
-            detail: e.to_string(),
-        })?;
-        let text_logits = extract_f32_tensor(&outputs, "text_logits", "tts_local_cached_step")?;
-        let audio_logits = extract_f32_tensor(&outputs, "audio_logits", "tts_local_cached_step")?;
-        let local_present = take_local_present_outputs(&mut outputs, assets, "tts_local_cached_step")?;
-        Ok(LocalCachedStepOutput {
-            text_logits,
-            audio_logits,
-            local_present,
-        })
     }
 
     fn run_decode_step<'a>(
@@ -657,67 +526,6 @@ impl MossSessions {
         })
     }
 
-    #[allow(dead_code)]
-    fn decode_full(&mut self, audio_frames: Vec<Vec<i64>>) -> Result<TtsResult, MossTtsError> {
-        let frames = audio_frames.len();
-        let quantizers = audio_frames.first().map(Vec::len).unwrap_or(0);
-        let audio_codes = audio_frames
-            .into_iter()
-            .flatten()
-            .map(to_i32)
-            .collect::<Result<Vec<_>, _>>()?;
-        let codes = Array3::from_shape_vec((1, frames, quantizers), audio_codes).map_err(|e| {
-            MossTtsError::Inference {
-                stage: "codec_decode_full",
-                detail: e.to_string(),
-            }
-        })?;
-        let lengths = Array1::from_vec(vec![to_i32(frames as i64)?]);
-        let lengths = lengths.into_shape_clone((1,)).map_err(|e| {
-            MossTtsError::Inference {
-                stage: "codec_decode_full",
-                detail: e.to_string(),
-            }
-        })?;
-
-        let outputs = self
-            .codec_decode_full
-            .run(ort::inputs![
-                "audio_codes" => TensorRef::from_array_view(codes.view()).map_err(|e| MossTtsError::Inference { stage: "codec_decode_full", detail: e.to_string() })?,
-                "audio_code_lengths" => TensorRef::from_array_view(lengths.view()).map_err(|e| MossTtsError::Inference { stage: "codec_decode_full", detail: e.to_string() })?
-            ])
-            .map_err(|e| MossTtsError::Inference {
-                stage: "codec_decode_full",
-                detail: e.to_string(),
-            })?;
-        let (audio_shape, audio_data) = outputs
-            .get("audio")
-            .ok_or_else(|| MossTtsError::Inference {
-                stage: "codec_decode_full",
-                detail: "missing audio output".to_string(),
-            })?
-            .try_extract_tensor::<f32>()
-            .map_err(|e| MossTtsError::Inference {
-                stage: "codec_decode_full",
-                detail: e.to_string(),
-            })?;
-        let audio_len = outputs
-            .get("audio_lengths")
-            .or_else(|| outputs.get("audio_length"))
-            .and_then(extract_audio_length_value)
-            .map(|len| len.max(0) as usize)
-            .unwrap_or(audio_shape[2] as usize)
-            .min(audio_shape[2] as usize);
-        let samples =
-            interleave_codec_audio(audio_shape, audio_data, audio_len, "codec_decode_full")?;
-        Ok(TtsResult {
-            audio: AudioBuffer {
-                sample_rate_hz: PLAYBACK_SAMPLE_RATE_HZ,
-                channels: PLAYBACK_CHANNELS,
-                pcm: PcmData::F32(samples),
-            },
-        })
-    }
 }
 
 fn interleave_codec_audio(
@@ -865,22 +673,32 @@ fn extract_owned_f32_tensor(
 }
 
 const DEFAULT_MOSS_TTS_INTRA_THREADS: usize = 4;
+const DEFAULT_MOSS_TTS_INTER_THREADS: usize = 1;
 const MOSS_TTS_INTRA_THREADS_ENV: &str = "MOSS_TTS_INTRA_THREADS";
+const MOSS_TTS_INTER_THREADS_ENV: &str = "MOSS_TTS_INTER_THREADS";
 const MOSS_TTS_PARALLEL_EXECUTION_ENV: &str = "MOSS_TTS_PARALLEL_EXECUTION";
 const MOSS_TTS_MEMORY_PATTERN_ENV: &str = "MOSS_TTS_MEMORY_PATTERN";
+const MOSS_TTS_ORT_PROFILE_ENV: &str = "MOSS_TTS_ORT_PROFILE";
+const MOSS_TTS_ORT_PROFILE_DIR_ENV: &str = "MOSS_TTS_ORT_PROFILE_DIR";
 
 fn create_session(path: &Path, model_name: &'static str) -> Result<Session, MossTtsError> {
     let intra_threads = moss_tts_intra_threads();
+    let inter_threads = moss_tts_inter_threads();
     let parallel_execution = moss_tts_parallel_execution();
     let memory_pattern = moss_tts_memory_pattern();
+    let profiling_file = moss_tts_ort_profile_file(model_name);
     Session::builder()
-        .and_then(|b| {
-            b.with_optimization_level(GraphOptimizationLevel::Level3)?
+        .and_then(|mut b| {
+            b = b
+                .with_optimization_level(GraphOptimizationLevel::Level3)?
                 .with_intra_threads(intra_threads)?
-                .with_inter_threads(1)?
+                .with_inter_threads(inter_threads)?
                 .with_parallel_execution(parallel_execution)?
-                .with_memory_pattern(memory_pattern)?
-                .commit_from_file(path)
+                .with_memory_pattern(memory_pattern)?;
+            if let Some(profiling_file) = profiling_file {
+                b = b.with_profiling(profiling_file)?;
+            }
+            b.commit_from_file(path)
         })
         .map_err(|e| MossTtsError::Inference {
             stage: "session_init",
@@ -891,11 +709,18 @@ fn create_session(path: &Path, model_name: &'static str) -> Result<Session, Moss
 fn moss_tts_intra_threads() -> usize {
     std::env::var(MOSS_TTS_INTRA_THREADS_ENV)
         .ok()
-        .and_then(|value| parse_moss_tts_intra_threads(&value))
+        .and_then(|value| parse_moss_tts_threads(&value))
         .unwrap_or(DEFAULT_MOSS_TTS_INTRA_THREADS)
 }
 
-fn parse_moss_tts_intra_threads(value: &str) -> Option<usize> {
+fn moss_tts_inter_threads() -> usize {
+    std::env::var(MOSS_TTS_INTER_THREADS_ENV)
+        .ok()
+        .and_then(|value| parse_moss_tts_threads(&value))
+        .unwrap_or(DEFAULT_MOSS_TTS_INTER_THREADS)
+}
+
+fn parse_moss_tts_threads(value: &str) -> Option<usize> {
     value
         .trim()
         .parse::<usize>()
@@ -915,6 +740,63 @@ fn moss_tts_memory_pattern() -> bool {
         .ok()
         .and_then(|value| parse_bool_env(&value))
         .unwrap_or(true)
+}
+
+fn moss_tts_ort_profile_file(model_name: &'static str) -> Option<PathBuf> {
+    let enabled = std::env::var(MOSS_TTS_ORT_PROFILE_ENV)
+        .ok()
+        .and_then(|value| parse_bool_env(&value))
+        .unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let dir = std::env::var(MOSS_TTS_ORT_PROFILE_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir().join("voice-coding-moss-ort-profiles"));
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        log::warn!(
+            target: "tts_moss::perf",
+            "failed to create MOSS ORT profile dir {}: {}",
+            dir.display(),
+            error
+        );
+        return None;
+    }
+    let session_name = model_name.replace('.', "_");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    Some(dir.join(format!("{session_name}-{stamp}.json")))
+}
+
+fn end_session_profiling(session: &mut Session, model_name: &'static str) {
+    if !std::env::var(MOSS_TTS_ORT_PROFILE_ENV)
+        .ok()
+        .and_then(|value| parse_bool_env(&value))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    match session.end_profiling() {
+        Ok(path) => {
+            log::info!(
+                target: "tts_moss::perf",
+                "moss_ort_profile session={} path={}",
+                model_name,
+                path
+            );
+            eprintln!("moss_ort_profile session={model_name} path={path}");
+        }
+        Err(error) => {
+            log::warn!(
+                target: "tts_moss::perf",
+                "failed to end MOSS ORT profiling for {}: {}",
+                model_name,
+                error
+            );
+        }
+    }
 }
 
 fn parse_bool_env(value: &str) -> Option<bool> {
@@ -1001,14 +883,18 @@ fn validate_meta_consistency(
     Ok(())
 }
 
-fn validate_model_files(
+fn validate_required_model_files(
     base_dir: &Path,
     prefix: &'static str,
     files: &HashMap<String, String>,
     external_data_files: &HashMap<String, Vec<String>>,
+    required_keys: &[&str],
 ) -> Result<HashMap<String, PathBuf>, MossTtsError> {
     let mut resolved = HashMap::new();
-    for (key, raw_path) in files {
+    for key in required_keys {
+        let raw_path = files
+            .get(*key)
+            .ok_or_else(|| MossTtsError::MetadataMismatch(format!("missing model file key '{key}'")))?;
         let path = resolve_manifest_path(base_dir, &format!("{prefix}.files.{key}"), raw_path)?;
         ensure_file(&path, "onnx")?;
         if let Some(external_files) = external_data_files.get(raw_path) {
@@ -1021,7 +907,7 @@ fn validate_model_files(
                 ensure_file(&external_path, "external data")?;
             }
         }
-        resolved.insert(key.clone(), path);
+        resolved.insert((*key).to_string(), path);
     }
     Ok(resolved)
 }
@@ -1061,38 +947,6 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, MossTtsErro
 struct GeneratedFrame {
     should_continue: bool,
     frame: Vec<i64>,
-}
-
-struct LocalCachedStepOutput {
-    text_logits: Vec<f32>,
-    audio_logits: Vec<f32>,
-    local_present: Vec<(String, DynValue)>,
-}
-
-struct LocalCachedStepRequest {
-    text_token_id: i64,
-    audio_token_id: i64,
-    channel_index: usize,
-    step_type: LocalStepType,
-    local_past: Option<Vec<(String, DynValue)>>,
-    past_valid_length: i64,
-}
-
-#[derive(Clone, Copy)]
-enum LocalStepType {
-    Text,
-    FirstAudio,
-    Audio,
-}
-
-impl LocalStepType {
-    fn as_i32(self) -> i32 {
-        match self {
-            Self::Text => 0,
-            Self::FirstAudio => 1,
-            Self::Audio => 2,
-        }
-    }
 }
 
 fn take_output(
@@ -1183,81 +1037,6 @@ fn decode_present_name_pairs(assets: &MossAssets) -> Result<(Vec<&String>, Vec<&
         )));
     }
     Ok((input_names, output_names))
-}
-
-fn take_local_present_outputs(
-    outputs: &mut ort::session::SessionOutputs<'_>,
-    assets: &MossAssets,
-    stage: &'static str,
-) -> Result<Vec<(String, DynValue)>, MossTtsError> {
-    let input_names = assets
-        .tts_meta
-        .onnx
-        .local_cached_input_names
-        .iter()
-        .skip(6)
-        .collect::<Vec<_>>();
-    let output_names = assets
-        .tts_meta
-        .onnx
-        .local_cached_output_names
-        .iter()
-        .skip(2)
-        .collect::<Vec<_>>();
-    if input_names.len() != output_names.len() {
-        return Err(MossTtsError::MetadataMismatch(format!(
-            "local cached past input/output count mismatch: {} inputs, {} outputs",
-            input_names.len(),
-            output_names.len()
-        )));
-    }
-    let mut values = Vec::new();
-    for (input_name, output_name) in input_names.into_iter().zip(output_names) {
-        values.push((input_name.clone(), take_output(outputs, output_name, stage)?));
-    }
-    Ok(values)
-}
-
-fn create_empty_local_past(assets: &MossAssets) -> Result<Vec<(String, DynValue)>, MossTtsError> {
-    let input_names = assets
-        .tts_meta
-        .onnx
-        .local_cached_input_names
-        .iter()
-        .skip(6)
-        .collect::<Vec<_>>();
-    if input_names.len() % 2 != 0 {
-        return Err(MossTtsError::MetadataMismatch(format!(
-            "local cached past input count must be even, got {}",
-            input_names.len()
-        )));
-    }
-    let config = &assets.tts_meta.model_config;
-    if config.local_layers == 0 || config.local_heads == 0 || config.local_head_dim == 0 {
-        return Err(MossTtsError::MetadataMismatch(
-            "tts model_config local_layers/local_heads/local_head_dim are required for local_cached_step"
-                .to_string(),
-        ));
-    }
-    let mut past = Vec::with_capacity(input_names.len());
-    for (index, input_name) in input_names.into_iter().enumerate() {
-        let value = ArrayD::<f32>::zeros(IxDyn(&[
-            1,
-            0,
-            config.local_heads,
-            config.local_head_dim,
-        ]));
-        past.push((
-            input_name.clone(),
-            Value::from_array(value)
-                .map(|tensor| tensor.into_dyn())
-                .map_err(|e| MossTtsError::Inference {
-                    stage: "tts_local_cached_step",
-                    detail: format!("failed to create empty local past tensor {index}: {e}"),
-                })?,
-        ));
-    }
-    Ok(past)
 }
 
 fn extract_i64_tensor(
@@ -1377,185 +1156,6 @@ fn extract_first_i64(
         })
 }
 
-fn extract_f32_tensor(
-    outputs: &ort::session::SessionOutputs<'_>,
-    name: &str,
-    stage: &'static str,
-) -> Result<Vec<f32>, MossTtsError> {
-    outputs
-        .get(name)
-        .ok_or_else(|| MossTtsError::Inference {
-            stage,
-            detail: format!("missing output '{name}'"),
-        })?
-        .try_extract_tensor::<f32>()
-        .map(|(_, data)| data.to_vec())
-        .map_err(|e| MossTtsError::Inference {
-            stage,
-            detail: e.to_string(),
-        })
-}
-
-fn greedy_token_from_logits(logits: &[f32], stage: &'static str) -> Result<i64, MossTtsError> {
-    let (token, _) = logits
-        .iter()
-        .enumerate()
-        .max_by(|(_, left), (_, right)| left.total_cmp(right))
-        .ok_or_else(|| MossTtsError::Inference {
-            stage,
-            detail: "empty logits".to_string(),
-        })?;
-    Ok(token as i64)
-}
-
-fn sample_token_from_logits(
-    logits: &[f32],
-    temperature: f32,
-    top_p: f32,
-    top_k: usize,
-    rng: &mut SimpleRng,
-    stage: &'static str,
-) -> Result<i64, MossTtsError> {
-    if logits.is_empty() {
-        return Err(MossTtsError::Inference {
-            stage,
-            detail: "empty logits".to_string(),
-        });
-    }
-    if temperature <= 0.0 {
-        return greedy_token_from_logits(logits, stage);
-    }
-    let mut ranked = logits
-        .iter()
-        .enumerate()
-        .map(|(index, logit)| (index, *logit / temperature))
-        .collect::<Vec<_>>();
-    ranked.sort_by(|(_, left), (_, right)| right.total_cmp(left));
-    if top_k > 0 && ranked.len() > top_k {
-        ranked.truncate(top_k);
-    }
-
-    let max_logit = ranked
-        .first()
-        .map(|(_, logit)| *logit)
-        .ok_or_else(|| MossTtsError::Inference {
-            stage,
-            detail: "empty ranked logits".to_string(),
-        })?;
-    let mut probs = ranked
-        .into_iter()
-        .map(|(index, logit)| (index, (logit - max_logit).exp()))
-        .collect::<Vec<_>>();
-    let total = probs.iter().map(|(_, prob)| *prob).sum::<f32>();
-    if !total.is_finite() || total <= 0.0 {
-        return greedy_token_from_logits(logits, stage);
-    }
-    for (_, prob) in &mut probs {
-        *prob /= total;
-    }
-    if top_p > 0.0 && top_p < 1.0 {
-        let mut cumulative = 0.0;
-        let mut keep = 0usize;
-        for (_, prob) in &probs {
-            cumulative += *prob;
-            keep += 1;
-            if cumulative >= top_p {
-                break;
-            }
-        }
-        probs.truncate(keep.max(1));
-    }
-    let total = probs.iter().map(|(_, prob)| *prob).sum::<f32>();
-    let mut threshold = rng.next_f32() * total;
-    for (index, prob) in probs {
-        if threshold <= prob {
-            return Ok(index as i64);
-        }
-        threshold -= prob;
-    }
-    greedy_token_from_logits(logits, stage)
-}
-
-fn apply_repetition_penalty(
-    logits: &[f32],
-    seen_tokens: Option<&[bool]>,
-    penalty: f32,
-) -> Vec<f32> {
-    let Some(seen_tokens) = seen_tokens else {
-        return logits.to_vec();
-    };
-    if penalty <= 0.0 || (penalty - 1.0).abs() < f32::EPSILON {
-        return logits.to_vec();
-    }
-    logits
-        .iter()
-        .enumerate()
-        .map(|(index, logit)| {
-            if seen_tokens.get(index).copied().unwrap_or(false) {
-                if *logit < 0.0 {
-                    *logit * penalty
-                } else {
-                    *logit / penalty
-                }
-            } else {
-                *logit
-            }
-        })
-        .collect()
-}
-
-fn channel_logits<'a>(
-    audio_logits: &'a [f32],
-    channel_index: usize,
-    assets: &MossAssets,
-) -> Result<&'a [f32], MossTtsError> {
-    let codebook_size = assets.audio_codebook_size();
-    let expected = assets.n_vq() * codebook_size;
-    if audio_logits.len() != expected {
-        return Err(MossTtsError::Inference {
-            stage: "tts_local_greedy",
-            detail: format!("expected {expected} audio logits, got {}", audio_logits.len()),
-        });
-    }
-    let start = channel_index.checked_mul(codebook_size).ok_or_else(|| MossTtsError::Inference {
-        stage: "tts_local_greedy",
-        detail: "channel index overflow".to_string(),
-    })?;
-    let end = start + codebook_size;
-    audio_logits.get(start..end).ok_or_else(|| MossTtsError::Inference {
-        stage: "tts_local_greedy",
-        detail: format!("channel {channel_index} logits out of range"),
-    })
-}
-
-#[allow(dead_code)]
-fn greedy_frame_from_logits(
-    logits: &[f32],
-    n_vq: usize,
-    codebook_size: usize,
-) -> Result<Vec<i64>, MossTtsError> {
-    let expected = n_vq * codebook_size;
-    if logits.len() != expected {
-        return Err(MossTtsError::Inference {
-            stage: "tts_local_greedy",
-            detail: format!("expected {expected} logits, got {}", logits.len()),
-        });
-    }
-    let mut frame = Vec::with_capacity(n_vq);
-    for channel_logits in logits.chunks_exact(codebook_size) {
-        let (token, _) = channel_logits
-            .iter()
-            .enumerate()
-            .max_by(|(_, left), (_, right)| left.total_cmp(right))
-            .ok_or_else(|| MossTtsError::Inference {
-                stage: "tts_local_greedy",
-                detail: "empty codebook logits".to_string(),
-            })?;
-        frame.push(token as i64);
-    }
-    Ok(frame)
-}
-
 struct SimpleRng {
     state: u64,
 }
@@ -1584,5 +1184,27 @@ impl SimpleRng {
             .wrapping_add(1);
         let value = ((self.state >> 40) as f32) / ((1u64 << 24) as f32);
         value.clamp(0.0, 0.999_999_94)
+    }
+}
+
+fn pcm_sample_count(pcm: &PcmData) -> usize {
+    match pcm {
+        PcmData::I16(samples) => samples.len(),
+        PcmData::F32(samples) => samples.len(),
+    }
+}
+
+fn trace_moss_stage(stage: &str, started: Instant, detail: std::fmt::Arguments<'_>) {
+    let elapsed_ms = started.elapsed().as_millis();
+    let detail = detail.to_string();
+    log::info!(
+        target: "tts_moss::perf",
+        "moss_tts_trace stage={} elapsed_ms={} {}",
+        stage,
+        elapsed_ms,
+        detail,
+    );
+    if std::env::var("MOSS_TTS_TRACE").is_ok_and(|value| parse_bool_env(&value).unwrap_or(false)) {
+        eprintln!("moss_tts_trace stage={stage} elapsed_ms={elapsed_ms} {detail}");
     }
 }

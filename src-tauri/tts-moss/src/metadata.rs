@@ -38,48 +38,13 @@ struct PromptTemplates {
 #[derive(Debug, Clone, Deserialize)]
 struct GenerationDefaults {
     max_new_frames: u32,
-    #[serde(default = "default_text_temperature")]
-    text_temperature: f32,
-    #[serde(default = "default_text_top_p")]
-    text_top_p: f32,
-    #[serde(default = "default_text_top_k")]
-    text_top_k: usize,
+    #[allow(dead_code)]
     #[serde(default = "default_audio_temperature")]
     audio_temperature: f32,
-    #[serde(default = "default_audio_top_p")]
-    audio_top_p: f32,
-    #[serde(default = "default_audio_top_k")]
-    audio_top_k: usize,
-    #[serde(default = "default_audio_repetition_penalty")]
-    audio_repetition_penalty: f32,
-}
-
-fn default_text_temperature() -> f32 {
-    1.0
-}
-
-fn default_text_top_p() -> f32 {
-    1.0
-}
-
-fn default_text_top_k() -> usize {
-    50
 }
 
 fn default_audio_temperature() -> f32 {
     0.8
-}
-
-fn default_audio_top_p() -> f32 {
-    0.95
-}
-
-fn default_audio_top_k() -> usize {
-    25
-}
-
-fn default_audio_repetition_penalty() -> f32 {
-    1.2
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +60,7 @@ struct TtsMeta {
     files: HashMap<String, String>,
     #[serde(default)]
     external_data_files: HashMap<String, Vec<String>>,
+    #[allow(dead_code)]
     #[serde(default)]
     model_config: TtsModelConfig,
     onnx: TtsOnnxMeta,
@@ -102,10 +68,13 @@ struct TtsMeta {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 struct TtsModelConfig {
+    #[allow(dead_code)]
     #[serde(default)]
     local_layers: usize,
+    #[allow(dead_code)]
     #[serde(default)]
     local_heads: usize,
+    #[allow(dead_code)]
     #[serde(default)]
     local_head_dim: usize,
 }
@@ -118,10 +87,6 @@ struct TtsOnnxMeta {
     decode_input_names: Vec<String>,
     #[serde(default)]
     decode_output_names: Vec<String>,
-    #[serde(default)]
-    local_cached_input_names: Vec<String>,
-    #[serde(default)]
-    local_cached_output_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,8 +114,10 @@ struct CodecOnnxMeta {
     encode_input_names: Vec<String>,
     #[serde(default)]
     encode_output_names: Vec<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     decode_input_names: Vec<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     decode_output_names: Vec<String>,
     #[serde(default)]
@@ -332,7 +299,7 @@ impl CodecDecodeStepState {
 
     fn update_from_owned_outputs(
         &mut self,
-        outputs: &HashMap<String, OwnedTensorData>,
+        outputs: &mut HashMap<String, OwnedTensorData>,
     ) -> Result<(), MossTtsError> {
         for offset in &mut self.transformer_offsets {
             offset.update_from_outputs(outputs)?;
@@ -346,19 +313,19 @@ impl CodecDecodeStepState {
         Ok(())
     }
 
-    fn collect_input_arrays(
-        &self,
-        i32_tensors: &mut Vec<(String, ArrayD<i32>)>,
-        f32_tensors: &mut Vec<(String, ArrayD<f32>)>,
+    fn collect_input_views<'a>(
+        &'a self,
+        i32_tensors: &mut Vec<(String, ArrayViewD<'a, i32>)>,
+        f32_tensors: &mut Vec<(String, ArrayViewD<'a, f32>)>,
     ) -> Result<(), MossTtsError> {
         for offset in &self.transformer_offsets {
-            i32_tensors.push((offset.input_name.clone(), offset.to_array()?));
+            i32_tensors.push((offset.input_name.clone(), offset.view()?));
         }
         for cache in &self.attention_caches {
-            i32_tensors.push((cache.offset.input_name.clone(), cache.offset.to_array()?));
-            f32_tensors.push((cache.keys.input_name.clone(), cache.keys.to_array()?));
-            f32_tensors.push((cache.values.input_name.clone(), cache.values.to_array()?));
-            i32_tensors.push((cache.positions.input_name.clone(), cache.positions.to_array()?));
+            i32_tensors.push((cache.offset.input_name.clone(), cache.offset.view()?));
+            f32_tensors.push((cache.keys.input_name.clone(), cache.keys.view()?));
+            f32_tensors.push((cache.values.input_name.clone(), cache.values.view()?));
+            i32_tensors.push((cache.positions.input_name.clone(), cache.positions.view()?));
         }
         Ok(())
     }
@@ -382,10 +349,10 @@ impl NamedI32TensorState {
 
     fn update_from_outputs(
         &mut self,
-        outputs: &HashMap<String, OwnedTensorData>,
+        outputs: &mut HashMap<String, OwnedTensorData>,
     ) -> Result<(), MossTtsError> {
         let tensor = outputs
-            .get(&self.output_name)
+            .remove(&self.output_name)
             .ok_or_else(|| codec_decode_step_unavailable(format!(
                 "missing state output '{}'",
                 self.output_name
@@ -396,15 +363,15 @@ impl NamedI32TensorState {
                 self.output_name
             )));
         };
-        self.shape = shape.clone();
-        self.data = data.clone();
+        self.shape = shape;
+        self.data = data;
         Ok(())
     }
 
-    fn to_array(&self) -> Result<ArrayD<i32>, MossTtsError> {
-        ArrayD::from_shape_vec(IxDyn(&self.shape), self.data.clone()).map_err(|e| {
+    fn view(&self) -> Result<ArrayViewD<'_, i32>, MossTtsError> {
+        ArrayViewD::from_shape(IxDyn(&self.shape), &self.data).map_err(|e| {
             codec_decode_step_unavailable(format!(
-                "failed to build state tensor '{}': {e}",
+                "failed to build state tensor view '{}': {e}",
                 self.input_name
             ))
         })
@@ -424,10 +391,10 @@ impl NamedF32TensorState {
 
     fn update_from_outputs(
         &mut self,
-        outputs: &HashMap<String, OwnedTensorData>,
+        outputs: &mut HashMap<String, OwnedTensorData>,
     ) -> Result<(), MossTtsError> {
         let tensor = outputs
-            .get(&self.output_name)
+            .remove(&self.output_name)
             .ok_or_else(|| codec_decode_step_unavailable(format!(
                 "missing state output '{}'",
                 self.output_name
@@ -438,15 +405,15 @@ impl NamedF32TensorState {
                 self.output_name
             )));
         };
-        self.shape = shape.clone();
-        self.data = data.clone();
+        self.shape = shape;
+        self.data = data;
         Ok(())
     }
 
-    fn to_array(&self) -> Result<ArrayD<f32>, MossTtsError> {
-        ArrayD::from_shape_vec(IxDyn(&self.shape), self.data.clone()).map_err(|e| {
+    fn view(&self) -> Result<ArrayViewD<'_, f32>, MossTtsError> {
+        ArrayViewD::from_shape(IxDyn(&self.shape), &self.data).map_err(|e| {
             codec_decode_step_unavailable(format!(
-                "failed to build state tensor '{}': {e}",
+                "failed to build state tensor view '{}': {e}",
                 self.input_name
             ))
         })

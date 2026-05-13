@@ -404,8 +404,6 @@ fn missing_tts_files(package_dir: &Path, engine_model_dir: &Path) -> Vec<Missing
         "moss_tts_prefill.onnx",
         "moss_tts_decode_step.onnx",
         "moss_tts_global_shared.data",
-        "moss_tts_local_decoder.onnx",
-        "moss_tts_local_cached_step.onnx",
         "moss_tts_local_fixed_sampled_frame.onnx",
         "moss_tts_local_shared.data",
     ] {
@@ -422,7 +420,6 @@ fn missing_tts_files(package_dir: &Path, engine_model_dir: &Path) -> Vec<Missing
         "codec_browser_onnx_meta.json",
         "moss_audio_tokenizer_encode.onnx",
         "moss_audio_tokenizer_encode.data",
-        "moss_audio_tokenizer_decode_full.onnx",
         "moss_audio_tokenizer_decode_step.onnx",
         "moss_audio_tokenizer_decode_shared.data",
     ] {
@@ -749,8 +746,6 @@ mod tests {
                 "moss_tts_prefill.onnx",
                 "moss_tts_decode_step.onnx",
                 "moss_tts_global_shared.data",
-                "moss_tts_local_decoder.onnx",
-                "moss_tts_local_cached_step.onnx",
                 "moss_tts_local_fixed_sampled_frame.onnx",
                 "moss_tts_local_shared.data",
             ] {
@@ -760,7 +755,6 @@ mod tests {
                 "codec_browser_onnx_meta.json",
                 "moss_audio_tokenizer_encode.onnx",
                 "moss_audio_tokenizer_encode.data",
-                "moss_audio_tokenizer_decode_full.onnx",
                 "moss_audio_tokenizer_decode_step.onnx",
                 "moss_audio_tokenizer_decode_shared.data",
             ] {
