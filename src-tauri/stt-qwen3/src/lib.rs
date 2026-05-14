@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use log::info;
 use serde::{Deserialize, Serialize};
 use stt_core::{
-    AudioInput, Result as SttCoreResult, SttConfig, SttEngine, SttError, SttResult,
-    StreamingAudioChunk, StreamingStt, StreamingSttEvent, StreamingSttSession,
-    StreamingTranscript, TimingInfo,
+    AudioInput, Result as SttCoreResult, StreamingAudioChunk, StreamingStt, StreamingSttEvent,
+    StreamingSttSession, StreamingTranscript, SttConfig, SttEngine, SttError, SttResult,
+    TimingInfo,
 };
 
 use audio::loader;
@@ -304,9 +304,9 @@ impl<'a> Qwen3StreamingSession<'a> {
 
     fn process_accumulated_audio(&mut self, emit_partial: bool) -> Result<(), SttError> {
         let prefix = self.rollback_prefix()?;
-        let decoded = self
-            .engine
-            .decode_samples_with_prefix(&self.audio_accum, &self.config, &prefix)?;
+        let decoded =
+            self.engine
+                .decode_samples_with_prefix(&self.audio_accum, &self.config, &prefix)?;
 
         self.raw_decoded = format!("{prefix}{}", decoded.text);
         let parsed = parse_qwen3_output(&self.raw_decoded, self.config.language.as_deref());
@@ -316,9 +316,8 @@ impl<'a> Qwen3StreamingSession<'a> {
         self.tokens_generated += decoded.tokens_generated;
 
         if emit_partial {
-            self.events.push_back(StreamingSttEvent::Partial(
-                self.current_transcript(),
-            ));
+            self.events
+                .push_back(StreamingSttEvent::Partial(self.current_transcript()));
         }
         self.chunk_id += 1;
         Ok(())
@@ -429,7 +428,9 @@ impl StreamingSttSession for Qwen3StreamingSession<'_> {
     async fn push_audio(&mut self, chunk: StreamingAudioChunk) -> SttCoreResult<()> {
         self.ensure_active()?;
         if self.ended {
-            return Err(SttError::Other("cannot push audio after stream finished".into()));
+            return Err(SttError::Other(
+                "cannot push audio after stream finished".into(),
+            ));
         }
 
         self.append_audio(chunk)?;
@@ -446,7 +447,8 @@ impl StreamingSttSession for Qwen3StreamingSession<'_> {
         if !self.ended {
             self.process_tail()?;
             let result = self.current_result();
-            self.events.push_back(StreamingSttEvent::End(result.clone()));
+            self.events
+                .push_back(StreamingSttEvent::End(result.clone()));
             self.ended = true;
             Ok(result)
         } else {
@@ -577,27 +579,41 @@ impl SttEngine for Qwen3AsrEngine {
         let onnx_dir = model_dir.join("onnx_models");
 
         let has_any = |base_dir: &Path, candidates: &[&str]| {
-            candidates.iter().any(|candidate| base_dir.join(candidate).exists())
+            candidates
+                .iter()
+                .any(|candidate| base_dir.join(candidate).exists())
         };
 
         if !has_any(&onnx_dir, &["encoder.int4.onnx", "encoder.onnx"]) {
             return Err(SttError::InferenceError {
                 model: "encoder".into(),
-                detail: format!("Missing file: one of {:?} in {}", ["encoder.int4.onnx", "encoder.onnx"], onnx_dir.display()),
+                detail: format!(
+                    "Missing file: one of {:?} in {}",
+                    ["encoder.int4.onnx", "encoder.onnx"],
+                    onnx_dir.display()
+                ),
             });
         }
 
         if !has_any(&onnx_dir, &["decoder_init.int4.onnx", "decoder_init.onnx"]) {
             return Err(SttError::InferenceError {
                 model: "decoder_init".into(),
-                detail: format!("Missing file: one of {:?} in {}", ["decoder_init.int4.onnx", "decoder_init.onnx"], onnx_dir.display()),
+                detail: format!(
+                    "Missing file: one of {:?} in {}",
+                    ["decoder_init.int4.onnx", "decoder_init.onnx"],
+                    onnx_dir.display()
+                ),
             });
         }
 
         if !has_any(&onnx_dir, &["decoder_step.int4.onnx", "decoder_step.onnx"]) {
             return Err(SttError::InferenceError {
                 model: "decoder_step".into(),
-                detail: format!("Missing file: one of {:?} in {}", ["decoder_step.int4.onnx", "decoder_step.onnx"], onnx_dir.display()),
+                detail: format!(
+                    "Missing file: one of {:?} in {}",
+                    ["decoder_step.int4.onnx", "decoder_step.onnx"],
+                    onnx_dir.display()
+                ),
             });
         }
 
@@ -669,11 +685,7 @@ mod tests {
         let tokens = vec![1, 2, 3, 4, 5];
 
         let prefix = rollback_prefix_from_tokens_with_decoder(&tokens, 2, |ids| {
-            Ok(ids
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(","))
+            Ok(ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
         })
         .unwrap();
 
@@ -685,11 +697,7 @@ mod tests {
         let tokens = vec![1, 2, 3];
 
         let prefix = rollback_prefix_from_tokens_with_decoder(&tokens, 99, |ids| {
-            Ok(ids
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(","))
+            Ok(ids.iter().map(u32::to_string).collect::<Vec<_>>().join(","))
         })
         .unwrap();
 

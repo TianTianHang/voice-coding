@@ -2,8 +2,8 @@
 // Each test loads a 2.5GB model, so concurrent execution will exceed memory limits.
 // Run with: cargo test --test boundary_test -- --test-threads=1
 
-use stt_core::{AudioInput, SttConfig, SttEngine};
 use std::sync::Arc;
+use stt_core::{AudioInput, SttConfig, SttEngine};
 
 use once_cell::sync::Lazy;
 use stt_qwen3::Qwen3AsrEngine;

@@ -103,7 +103,7 @@
           libdrm
           libxkbcommon
 
-          # ONNX Runtime for STT inference
+          # ONNX Runtime 
           onnxruntime
 
           # GStreamer for WebKitGTK media support (audio recording)

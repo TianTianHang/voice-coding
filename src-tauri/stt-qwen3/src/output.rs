@@ -118,7 +118,10 @@ mod tests {
             Some("en"),
         );
 
-        assert_eq!(parsed.text, "language Chinese<asr_text> should stay visible");
+        assert_eq!(
+            parsed.text,
+            "language Chinese<asr_text> should stay visible"
+        );
         assert_eq!(parsed.language, "en");
     }
 

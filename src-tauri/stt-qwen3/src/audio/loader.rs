@@ -173,12 +173,7 @@ pub fn load_audio_from_bytes(data: &[u8]) -> Result<Vec<f32>, SttError> {
 }
 
 fn append_samples(decoded: &AudioBufferRef, channels_hint: usize, output: &mut Vec<f32>) {
-    let channels = decoded
-        .spec()
-        .channels
-        .count()
-        .max(channels_hint)
-        .max(1);
+    let channels = decoded.spec().channels.count().max(channels_hint).max(1);
     let mut sample_buffer = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
     sample_buffer.copy_interleaved_ref(decoded.clone());
     let samples = sample_buffer.samples();

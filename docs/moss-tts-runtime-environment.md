@@ -58,6 +58,39 @@ nix develop -c env \
 
 Profiler 输出为 Chrome trace 兼容 JSON。可用 `chrome://tracing`、Perfetto，或脚本按 `cat`、`args.op_name`、`name` 汇总。开启 profiler 会显著增加耗时和文件体积，只建议性能分析时使用。
 
+## TTS 主模型 int8 量化
+
+使用 `scripts/quantize_moss_tts_int8.py` 对 `MOSS-TTS-Nano-100M-ONNX` 目录内的 TTS ONNX 主图做动态 int8 权重量化。脚本默认量化 metadata `files` 中声明的全部 TTS 图：
+
+- `moss_tts_prefill.onnx`
+- `moss_tts_decode_step.onnx`
+- `moss_tts_local_decoder.onnx`
+- `moss_tts_local_cached_step.onnx`
+- `moss_tts_local_fixed_sampled_frame.onnx`
+
+脚本只处理 TTS 组件目录，不处理 `MOSS-Audio-Tokenizer-Nano-ONNX` codec 模型。量化输出会为每个 ONNX 生成独立的 `<model>.onnx.data` 外部权重文件，并同步改写 `tts_browser_onnx_meta.json` 的 `external_data_files`，让 Rust 运行时启动前能校验到新的外部权重。
+
+依赖使用项目 `.venv`：
+
+```bash
+.venv/bin/python -m pip install 'sympy>=1.12'
+```
+
+生成量化副本：
+
+```bash
+.venv/bin/python scripts/quantize_moss_tts_int8.py \
+  --output-dir /tmp/moss-tts-int8
+```
+
+替换当前模型目录：
+
+```bash
+.venv/bin/python scripts/quantize_moss_tts_int8.py --in-place
+```
+
+`--in-place` 会先在模型目录旁创建 `MOSS-TTS-Nano-100M-ONNX.backup-int8-<timestamp>`，备份旧 ONNX、旧共享 `.data` 和旧 metadata；量化和 ONNX Runtime session 校验全部成功后才覆盖当前目录。需要恢复时，将备份目录内的文件复制回 `MOSS-TTS-Nano-100M-ONNX`。
+
 ## 推理测试变量
 
 | 变量 | 默认值 | 说明 |

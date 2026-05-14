@@ -143,7 +143,12 @@ mod tests {
         prefix: &str,
     ) -> Result<Vec<u32>, SttError> {
         let fake = FakeTokenizer::new();
-        build_prompt_ids_with_prefix(n_audio_tokens, language, prefix, &fake as &dyn PromptTokenizer)
+        build_prompt_ids_with_prefix(
+            n_audio_tokens,
+            language,
+            prefix,
+            &fake as &dyn PromptTokenizer,
+        )
     }
 
     #[test]
