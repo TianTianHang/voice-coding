@@ -163,9 +163,7 @@ mod tests {
         std::env::set_var("VOICE_CODING_MODEL_HOME", "/tmp/voice-models");
         assert_eq!(
             MossModelConfig::from_env().model_dir,
-            PathBuf::from(
-                "/tmp/voice-models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX"
-            )
+            PathBuf::from("/tmp/voice-models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX")
         );
 
         std::env::set_var("MOSS_TTS_MODEL_DIR", "/tmp/direct-moss-component");
@@ -483,8 +481,8 @@ mod tests {
     #[test]
     fn decode_present_outputs_reject_mismatched_past_contract() {
         let fixture = MossFixture::new();
-        let mut tts_meta = std::fs::read_to_string(fixture.tts_dir.join("tts_browser_onnx_meta.json"))
-            .unwrap();
+        let mut tts_meta =
+            std::fs::read_to_string(fixture.tts_dir.join("tts_browser_onnx_meta.json")).unwrap();
         tts_meta = tts_meta.replace(
             r#""decode_output_names": ["global_hidden"]"#,
             r#""decode_output_names": ["global_hidden", "present_key_0"]"#,
@@ -528,26 +526,138 @@ mod tests {
     }
 
     #[test]
-    fn frame_budget_starts_small_expands_and_flushes_to_metadata_limit() {
-        let mut budget = FrameBudget::new(8, Some(10));
+    fn frame_budget_uses_one_second_startup_target_from_codec_rate() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let budget = FrameBudget::new(32, &codec_config);
 
-        assert_eq!(budget.next_batch_size(false), 1);
-        budget.record_pcm_samples(960);
-        assert_eq!(budget.next_batch_size(false), 2);
-        budget.record_pcm_samples(960);
-        assert_eq!(budget.next_batch_size(false), 4);
-        budget.record_pcm_samples(1_920);
-        assert_eq!(budget.next_batch_size(false), 8);
+        assert_eq!(frames_per_second(&codec_config), 12.5);
+        assert_eq!(budget.startup_target_frames(), 13);
+        assert_eq!(budget.next_batch_size(false), 13);
+    }
+
+    #[test]
+    fn frame_budget_startup_target_is_limited_by_metadata_batch_size() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let budget = FrameBudget::new(8, &codec_config);
+
+        assert_eq!(budget.startup_target_frames(), 8);
         assert_eq!(budget.next_batch_size(true), 8);
     }
 
     #[test]
-    fn frame_budget_never_exceeds_metadata_batch_limit() {
-        let mut budget = FrameBudget::new(2, Some(10));
-        budget.record_pcm_samples(10_000);
+    fn frame_budget_uses_default_downsample_rate_when_metadata_omits_it() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: None,
+        };
+        let budget = FrameBudget::new(32, &codec_config);
 
-        assert_eq!(budget.next_batch_size(false), 2);
-        assert_eq!(budget.next_batch_size(true), 2);
+        assert_eq!(budget.startup_target_frames(), 13);
+    }
+
+    #[test]
+    fn frame_budget_does_not_expand_before_first_batch() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let budget = FrameBudget::new(32, &codec_config);
+
+        assert_eq!(budget.next_batch_size(false), 13);
+        assert_eq!(budget.adaptive_target_buffer_seconds(), 1.0);
+    }
+
+    #[test]
+    fn frame_budget_slow_rtf_prefers_larger_batch_and_raises_target() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let mut budget = FrameBudget::new(32, &codec_config);
+        budget.record_pcm_samples_after(96_000, std::time::Duration::from_millis(0));
+        budget.record_pcm_samples_after(96_000, std::time::Duration::from_millis(2_300));
+
+        assert_eq!(budget.next_batch_size(false), 32);
+        assert!(budget.adaptive_target_buffer_seconds() >= 1.5);
+    }
+
+    #[test]
+    fn frame_budget_near_realtime_prefers_medium_large_batch() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let mut budget = FrameBudget::new(32, &codec_config);
+        budget.record_pcm_samples_after(96_000, std::time::Duration::from_millis(0));
+        budget.record_pcm_samples_after(96_000, std::time::Duration::from_millis(990));
+
+        assert_eq!(budget.next_batch_size(false), 24);
+        assert!(budget.adaptive_target_buffer_seconds() > 1.0);
+    }
+
+    #[test]
+    fn frame_budget_low_lead_uses_recovery_batches() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let mut budget = FrameBudget::new(24, &codec_config);
+        budget.record_pcm_samples_after(24_000, std::time::Duration::from_millis(0));
+
+        assert_eq!(budget.next_batch_size(false), 24);
+        assert!(budget.adaptive_target_buffer_seconds() > 1.0);
+    }
+
+    #[test]
+    fn frame_budget_fast_generation_reduces_target_but_not_below_floor() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let mut budget = FrameBudget::new(32, &codec_config);
+        budget.record_pcm_samples_after(192_000, std::time::Duration::from_millis(0));
+        for _ in 0..5 {
+            budget.record_pcm_samples_after(192_000, std::time::Duration::from_millis(500));
+        }
+
+        assert_eq!(budget.next_batch_size(false), 32);
+        assert!(budget.adaptive_target_buffer_seconds() >= 0.8);
+        assert!(budget.adaptive_target_buffer_seconds() < 1.0);
+    }
+
+    #[test]
+    fn frame_budget_flushes_to_metadata_limit() {
+        let codec_config = CodecConfig {
+            sample_rate: 48_000,
+            channels: 2,
+            num_quantizers: 16,
+            downsample_rate: Some(3_840),
+        };
+        let budget = FrameBudget::new(16, &codec_config);
+
+        assert_eq!(budget.next_batch_size(true), 16);
     }
 
     #[test]
@@ -604,14 +714,12 @@ mod tests {
         assert_eq!(audio_sequences, vec![1, 2, 3, 4]);
         assert!(matches!(events.last(), Some(TtsSynthesisEvent::End(_))));
         let expected_pause = pause_samples_between_chunks(2);
-        assert!(
-            matches!(result.audio.pcm, PcmData::F32(samples)
-                if samples.len() == 16 + expected_pause
-                    && samples[..8] == [0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3]
-                    && samples[8..8 + expected_pause].iter().all(|sample| *sample == 0.0)
-                    && samples[8 + expected_pause..] == [0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3]
-            )
-        );
+        assert!(matches!(result.audio.pcm, PcmData::F32(samples)
+            if samples.len() == 16 + expected_pause
+                && samples[..8] == [0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3]
+                && samples[8..8 + expected_pause].iter().all(|sample| *sample == 0.0)
+                && samples[8 + expected_pause..] == [0.3, 1.3, 0.3, 1.3, 0.3, 1.3, 0.3, 1.3]
+        ));
     }
 
     #[tokio::test]
@@ -896,11 +1004,7 @@ mod tests {
             ] {
                 std::fs::write(tts_dir.join(file), b"x").unwrap();
             }
-            for file in [
-                "encode.onnx",
-                "decode_step.onnx",
-                "codec_shared.data",
-            ] {
+            for file in ["encode.onnx", "decode_step.onnx", "codec_shared.data"] {
                 std::fs::write(codec_dir.join(file), b"x").unwrap();
             }
             let fixture = Self {
@@ -1075,7 +1179,7 @@ mod tests {
     "encode.onnx": ["codec_shared.data"],
     "decode_step.onnx": ["codec_shared.data"]
   }},
-  "codec_config": {{ "sample_rate": {sample_rate}, "channels": {channels}, "num_quantizers": {num_quantizers} }},
+  "codec_config": {{ "sample_rate": {sample_rate}, "channels": {channels}, "num_quantizers": {num_quantizers}, "downsample_rate": 3840 }},
   "onnx": {{
     "encode_input_names": ["waveform", "input_lengths"],
     "encode_output_names": ["audio_codes", "audio_code_lengths"],

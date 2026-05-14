@@ -106,6 +106,8 @@ struct CodecConfig {
     sample_rate: u32,
     channels: u16,
     num_quantizers: u32,
+    #[serde(default)]
+    downsample_rate: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

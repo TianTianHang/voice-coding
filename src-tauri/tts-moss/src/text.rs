@@ -376,13 +376,9 @@ where
         if encode(segment)?.len() <= max_tokens {
             push_encoded(chunks, encode, segment, preserve_segment_space)?;
         } else {
-            for piece in split_text_by_token_budget(
-                segment,
-                max_tokens,
-                encode,
-                preserve_segment_space,
-            )?
-                .into_iter()
+            for piece in
+                split_text_by_token_budget(segment, max_tokens, encode, preserve_segment_space)?
+                    .into_iter()
             {
                 push_encoded(chunks, encode, &piece, piece.starts_with(' '))?;
             }

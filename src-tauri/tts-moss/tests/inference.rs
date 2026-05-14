@@ -67,11 +67,7 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
 
     let warmup_started = Instant::now();
     let warmup_result = engine
-        .synthesize_stream_events(
-            &warmup_text,
-            perf_config(chunk_ms, seed),
-            Box::new(|_| {}),
-        )
+        .synthesize_stream_events(&warmup_text, perf_config(chunk_ms, seed), Box::new(|_| {}))
         .await
         .expect("MOSS warmup streaming synthesis should succeed");
     warmup_result
@@ -109,7 +105,10 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
         result.audio.pcm.len_frames(result.audio.channels) > 0,
         "synthesized audio should contain PCM frames"
     );
-    assert!(chunk_count > 0, "streaming synthesis should emit audio chunks");
+    assert!(
+        chunk_count > 0,
+        "streaming synthesis should emit audio chunks"
+    );
 
     let audio_duration_sec = audio_duration_sec(&result);
     assert!(
@@ -238,7 +237,10 @@ async fn synthesizes_playback_ready_audio_with_greedy_full_decode() {
     assert_eq!(result.audio.sample_rate_hz, PLAYBACK_SAMPLE_RATE_HZ);
     assert_eq!(result.audio.channels, PLAYBACK_CHANNELS);
     assert!(result.audio.pcm.len_frames(result.audio.channels) > 0);
-    assert_eq!(result.audio.pcm.len_frames(result.audio.channels), repeated.audio.pcm.len_frames(repeated.audio.channels));
+    assert_eq!(
+        result.audio.pcm.len_frames(result.audio.channels),
+        repeated.audio.pcm.len_frames(repeated.audio.channels)
+    );
 }
 
 #[tokio::test]

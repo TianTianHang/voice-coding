@@ -269,7 +269,7 @@ impl MossSessions {
         request: MossRequestRows,
         sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
-        requested_chunk_ms: Option<u32>,
+        _requested_chunk_ms: Option<u32>,
         mut on_pcm_chunk: F,
     ) -> Result<TtsResult, MossTtsError>
     where
@@ -277,7 +277,7 @@ impl MossSessions {
     {
         let (_, mut state) = self.ensure_codec_decode_step(assets)?;
         let mut pending_frames: Vec<Vec<i64>> = Vec::new();
-        let mut budget = FrameBudget::new(state.batch_size, requested_chunk_ms);
+        let mut budget = FrameBudget::new(state.batch_size, &assets.codec_meta.codec_config);
         let mut buffer = PcmChunkBuffer::default();
         let total_started = Instant::now();
 
