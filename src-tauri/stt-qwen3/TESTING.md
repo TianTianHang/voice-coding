@@ -35,6 +35,14 @@ cargo test --test boundary_test
 
 # 运行单个测试
 cargo test --test engine_test test_engine_initialization_success
+
+# 运行性能报告
+RUN_QWEN3_MODEL_TESTS=1 cargo test --test performance_test -- --ignored --nocapture
+
+# 运行 LibriSpeech Other WER 报告（对齐 qwen3-asr-onnx evaluate_wer.py 的 --datasets librispeech-other --n-samples 200）
+RUN_QWEN3_MODEL_TESTS=1 \
+QWEN3_WER_MANIFEST=/path/to/librispeech-other-200.jsonl \
+cargo test --test performance_test test_qwen3_librispeech_other_wer_report -- --ignored --nocapture
 ```
 
 ## 测试说明
@@ -119,6 +127,94 @@ cargo test --test engine_test test_engine_initialization_success
 
 #### 其他
 - `test_very_short_duration` - 极短音频
+
+### 4. 性能报告测试
+
+新增一个单独的性能报告测试，用于直观看到：
+- 模型加载耗时
+- 健康检查耗时
+- Warmup 转录耗时（不计入正式统计）
+- 不同输入长度下的转录耗时
+- `RTF`（real-time factor）
+
+#### 运行方式
+
+```bash
+RUN_QWEN3_MODEL_TESTS=1 cargo test --test performance_test -- --ignored --nocapture
+```
+
+#### 输出内容
+
+性能报告会直接打印一个表格，包含：
+- `audio`：输入音频时长
+- `wall_avg`：多轮正式测量的平均墙钟时间
+- `process_avg`：多轮正式测量的平均引擎内部处理时间
+- `rtf_avg`：多轮正式测量的平均实时因子
+- `wall_min/max`：多轮正式测量中的墙钟时间范围
+- `tokens`：平均生成 token 数
+- `chars`：平均最终转写字符数
+
+默认会先执行一次 2 秒 16kHz 音频 warmup，然后每个 case 正式测量 3 轮。Warmup 结果只用于观察首次推理开销，不计入表格统计。
+
+### 5. LibriSpeech Other WER 报告测试
+
+新增一个模型质量/性能综合报告测试：
+- `test_qwen3_librispeech_other_wer_report`
+- 参考上游 ONNX 导出仓库 `andrewleech/qwen3-asr-onnx` 的 `evaluate_wer.py`
+- 对齐其 `--datasets librispeech-other --n-samples 200` 的评测意图
+- 默认样本数为 `200`
+- 输出逐条样本的 `WER`、`CER`、耗时、`RTF`
+- 输出聚合 `WER`、`CER`、总音频时长、总耗时、整体 `RTF`
+- 输出和 int4 0.6B 报告值 `5.16% WER` 的百分点差距
+
+该测试不会在 Rust 测试内自动下载 HuggingFace 数据集，而是读取本地 JSONL manifest，以便离线、固定样本、可复现地对比结果。
+
+#### 运行方式
+
+```bash
+RUN_QWEN3_MODEL_TESTS=1 \
+QWEN3_WER_MANIFEST=/path/to/librispeech-other-200.jsonl \
+cargo test --test performance_test test_qwen3_librispeech_other_wer_report -- --ignored --nocapture
+```
+
+在本仓库推荐通过 Nix dev shell 运行：
+
+```bash
+nix develop -c env RUN_QWEN3_MODEL_TESTS=1 \
+QWEN3_WER_MANIFEST=/path/to/librispeech-other-200.jsonl \
+cargo test -p stt-qwen3 --test performance_test test_qwen3_librispeech_other_wer_report -- --ignored --nocapture
+```
+
+#### Manifest 格式
+
+每行一个 JSON 对象，音频路径可以是绝对路径，也可以是相对 manifest 文件所在目录的相对路径：
+
+```jsonl
+{"audio_filepath":"LibriSpeech/test-other/1089/134686/1089-134686-0000.flac","text":"HE HOPED THERE WOULD BE STEW FOR DINNER"}
+{"audio_filepath":"LibriSpeech/test-other/1089/134686/1089-134686-0001.flac","text":"THE OLD MAN HAD A WAY OF SMILING"}
+```
+
+兼容的音频字段名：
+- `audio_filepath`
+- `audio_path`
+- `audio`
+- `path`
+- `file`
+
+兼容的参考文本字段名：
+- `text`
+- `reference`
+- `transcript`
+- `sentence`
+- `target`
+
+#### 可配置项
+
+- `QWEN3_WER_MANIFEST`：必填，JSONL manifest 路径
+- `QWEN3_WER_N_SAMPLES`：可选，样本数，默认 `200`
+- `RUN_QWEN3_MODEL_TESTS=1`：必填，启用真实模型测试
+
+测试会先执行一次 2 秒 16kHz synthetic warmup，warmup 不计入 WER/CER/RTF 聚合统计。正式统计只包含 manifest 中的真实音频样本。
 
 ## 环境要求
 
