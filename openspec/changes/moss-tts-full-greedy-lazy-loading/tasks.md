@@ -1,0 +1,7 @@
+- [x] 1. 更新 `moss-onnx-tts-engine` delta spec，描述 greedy/local_decoder、非流式 full decode 和懒加载策略。
+- [x] 2. 调整资产加载与 sampling mode 解析，支持 optional `local_decoder`、`decode_full` 和 `greedy`。
+- [x] 3. 将 `MossSessions` 改为按需加载 session，并保持 `health_check` 不预加载 ONNX。
+- [x] 4. 实现非流式 `decode_full` 优先与 `decode_step` fallback，流式保持 step-only。
+- [x] 5. 实现 greedy local_decoder frame generation。
+- [x] 6. 更新文档、无模型单元测试和 ignored 真实模型测试。
+- [x] 7. 运行 `openspec validate moss-tts-full-greedy-lazy-loading --strict`、`nix develop -c cargo test -p tts-core`、`nix develop -c cargo test -p tts-moss`、`nix develop -c cargo clippy -p tts-moss --all-targets`。

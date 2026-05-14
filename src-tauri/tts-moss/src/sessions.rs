@@ -1,93 +1,193 @@
 struct MossSessions {
-    #[allow(dead_code)]
-    prefill: Session,
-    #[allow(dead_code)]
-    decode_step: Session,
-    #[allow(dead_code)]
-    local_fixed_sampled_frame: Session,
-    codec_encode: Session,
-    #[allow(dead_code)]
-    codec_decode_step: Session,
-    codec_decode_step_state: CodecDecodeStepState,
+    prefill: Option<Session>,
+    decode_step: Option<Session>,
+    local_fixed_sampled_frame: Option<Session>,
+    local_decoder: Option<Session>,
+    codec_encode: Option<Session>,
+    codec_decode_full: Option<Session>,
+    codec_decode_step: Option<Session>,
+    codec_decode_step_state: Option<CodecDecodeStepState>,
 }
 
 impl MossSessions {
-    fn load(assets: &MossAssets) -> Result<Self, MossTtsError> {
-        let prefill = create_session(required_file(&assets.tts_files, "prefill")?, "tts.prefill")?;
-        let decode_step = create_session(required_file(&assets.tts_files, "decode_step")?, "tts.decode_step")?;
-        let local_fixed_sampled_frame = create_session(
-            required_file(&assets.tts_files, "local_fixed_sampled_frame")?,
-            "tts.local_fixed_sampled_frame",
-        )?;
-        let codec_encode = create_session(
-            required_file(&assets.codec_files, "encode")?,
-            "codec.encode",
-        )?;
-        let codec_decode_step = create_session(
-            required_file(&assets.codec_files, "decode_step")?,
-            "codec.decode_step",
-        )?;
-
-        validate_session_io(
-            &prefill,
-            "tts.prefill",
-            ["input_ids", "attention_mask"],
-            assets.tts_meta.onnx.prefill_output_names.iter(),
-        )?;
-        validate_session_io(
-            &decode_step,
-            "tts.decode_step",
-            assets.tts_meta.onnx.decode_input_names.iter(),
-            assets.tts_meta.onnx.decode_output_names.iter(),
-        )?;
-        validate_session_io(
-            &local_fixed_sampled_frame,
-            "tts.local_fixed_sampled_frame",
-            &[
-                "global_hidden",
-                "repetition_seen_mask",
-                "assistant_random_u",
-                "audio_random_u",
-            ],
-            &["should_continue", "frame_token_ids"],
-        )?;
-        validate_session_io(
-            &codec_encode,
-            "codec.encode",
-            assets.codec_meta.onnx.encode_input_names.iter(),
-            assets.codec_meta.onnx.encode_output_names.iter(),
-        )?;
-        validate_session_io(
-            &codec_decode_step,
-            "codec.decode_step",
-            assets.codec_meta.onnx.decode_step_input_names.iter(),
-            assets.codec_meta.onnx.decode_step_output_names.iter(),
-        )?;
-        let codec_decode_step_state = CodecDecodeStepState::from_meta(&assets.codec_meta)?;
-
-        Ok(Self {
-            prefill,
-            decode_step,
-            local_fixed_sampled_frame,
-            codec_encode,
-            codec_decode_step,
-            codec_decode_step_state,
-        })
+    fn new() -> Self {
+        Self {
+            prefill: None,
+            decode_step: None,
+            local_fixed_sampled_frame: None,
+            local_decoder: None,
+            codec_encode: None,
+            codec_decode_full: None,
+            codec_decode_step: None,
+            codec_decode_step_state: None,
+        }
     }
 
     fn end_ort_profiling(&mut self) {
-        end_session_profiling(&mut self.prefill, "tts.prefill");
-        end_session_profiling(&mut self.decode_step, "tts.decode_step");
-        end_session_profiling(
-            &mut self.local_fixed_sampled_frame,
-            "tts.local_fixed_sampled_frame",
-        );
-        end_session_profiling(&mut self.codec_encode, "codec.encode");
-        end_session_profiling(&mut self.codec_decode_step, "codec.decode_step");
+        if let Some(session) = self.prefill.as_mut() {
+            end_session_profiling(session, "tts.prefill");
+        }
+        if let Some(session) = self.decode_step.as_mut() {
+            end_session_profiling(session, "tts.decode_step");
+        }
+        if let Some(session) = self.local_fixed_sampled_frame.as_mut() {
+            end_session_profiling(session, "tts.local_fixed_sampled_frame");
+        }
+        if let Some(session) = self.local_decoder.as_mut() {
+            end_session_profiling(session, "tts.local_decoder");
+        }
+        if let Some(session) = self.codec_encode.as_mut() {
+            end_session_profiling(session, "codec.encode");
+        }
+        if let Some(session) = self.codec_decode_full.as_mut() {
+            end_session_profiling(session, "codec.decode_full");
+        }
+        if let Some(session) = self.codec_decode_step.as_mut() {
+            end_session_profiling(session, "codec.decode_step");
+        }
+    }
+
+    fn ensure_prefill(&mut self, assets: &MossAssets) -> Result<&mut Session, MossTtsError> {
+        if self.prefill.is_none() {
+            let session = create_session(required_file(&assets.tts_files, "prefill")?, "tts.prefill")?;
+            validate_session_io(
+                &session,
+                "tts.prefill",
+                ["input_ids", "attention_mask"],
+                assets.tts_meta.onnx.prefill_output_names.iter(),
+            )?;
+            self.prefill = Some(session);
+        }
+        Ok(self.prefill.as_mut().expect("prefill session initialized"))
+    }
+
+    fn ensure_decode_step(&mut self, assets: &MossAssets) -> Result<&mut Session, MossTtsError> {
+        if self.decode_step.is_none() {
+            let session = create_session(required_file(&assets.tts_files, "decode_step")?, "tts.decode_step")?;
+            validate_session_io(
+                &session,
+                "tts.decode_step",
+                assets.tts_meta.onnx.decode_input_names.iter(),
+                assets.tts_meta.onnx.decode_output_names.iter(),
+            )?;
+            self.decode_step = Some(session);
+        }
+        Ok(self.decode_step.as_mut().expect("decode step session initialized"))
+    }
+
+    fn ensure_local_fixed_sampled_frame(
+        &mut self,
+        assets: &MossAssets,
+    ) -> Result<&mut Session, MossTtsError> {
+        if self.local_fixed_sampled_frame.is_none() {
+            let session = create_session(
+                required_file(&assets.tts_files, "local_fixed_sampled_frame")?,
+                "tts.local_fixed_sampled_frame",
+            )?;
+            validate_session_io(
+                &session,
+                "tts.local_fixed_sampled_frame",
+                &[
+                    "global_hidden",
+                    "repetition_seen_mask",
+                    "assistant_random_u",
+                    "audio_random_u",
+                ],
+                &["should_continue", "frame_token_ids"],
+            )?;
+            self.local_fixed_sampled_frame = Some(session);
+        }
+        Ok(self
+            .local_fixed_sampled_frame
+            .as_mut()
+            .expect("fixed session initialized"))
+    }
+
+    fn ensure_local_decoder(&mut self, assets: &MossAssets) -> Result<&mut Session, MossTtsError> {
+        if self.local_decoder.is_none() {
+            let session = create_session(required_file(&assets.tts_files, "local_decoder")?, "tts.local_decoder")?;
+            validate_session_io(
+                &session,
+                "tts.local_decoder",
+                ["global_hidden", "text_token_id", "audio_prefix_token_ids"],
+                ["text_logits", "audio_logits"],
+            )?;
+            self.local_decoder = Some(session);
+        }
+        Ok(self.local_decoder.as_mut().expect("local decoder initialized"))
+    }
+
+    fn ensure_codec_encode(&mut self, assets: &MossAssets) -> Result<&mut Session, MossTtsError> {
+        if self.codec_encode.is_none() {
+            let session = create_session(required_file(&assets.codec_files, "encode")?, "codec.encode")?;
+            validate_session_io(
+                &session,
+                "codec.encode",
+                assets.codec_meta.onnx.encode_input_names.iter(),
+                assets.codec_meta.onnx.encode_output_names.iter(),
+            )?;
+            self.codec_encode = Some(session);
+        }
+        Ok(self.codec_encode.as_mut().expect("codec encode initialized"))
+    }
+
+    fn ensure_codec_decode_full(
+        &mut self,
+        assets: &MossAssets,
+    ) -> Result<&mut Session, MossTtsError> {
+        if self.codec_decode_full.is_none() {
+            let session = create_session(
+                required_file(&assets.codec_files, "decode_full")?,
+                "codec.decode_full",
+            )?;
+            validate_session_io(
+                &session,
+                "codec.decode_full",
+                assets.codec_meta.onnx.decode_input_names.iter(),
+                assets.codec_meta.onnx.decode_output_names.iter(),
+            )?;
+            self.codec_decode_full = Some(session);
+        }
+        Ok(self
+            .codec_decode_full
+            .as_mut()
+            .expect("codec full decode initialized"))
+    }
+
+    fn ensure_codec_decode_step(
+        &mut self,
+        assets: &MossAssets,
+    ) -> Result<(&mut Session, CodecDecodeStepState), MossTtsError> {
+        if self.codec_decode_step.is_none() {
+            let session = create_session(
+                required_file(&assets.codec_files, "decode_step")?,
+                "codec.decode_step",
+            )?;
+            validate_session_io(
+                &session,
+                "codec.decode_step",
+                assets.codec_meta.onnx.decode_step_input_names.iter(),
+                assets.codec_meta.onnx.decode_step_output_names.iter(),
+            )?;
+            self.codec_decode_step = Some(session);
+        }
+        if self.codec_decode_step_state.is_none() {
+            self.codec_decode_step_state = Some(CodecDecodeStepState::from_meta(&assets.codec_meta)?);
+        }
+        Ok((
+            self.codec_decode_step
+                .as_mut()
+                .expect("codec step session initialized"),
+            self.codec_decode_step_state
+                .as_ref()
+                .expect("codec step state initialized")
+                .clone(),
+        ))
     }
 
     fn encode_reference_audio(
         &mut self,
+        assets: &MossAssets,
         audio: ReferenceAudio,
     ) -> Result<Vec<Vec<i64>>, MossTtsError> {
         if audio.sample_rate_hz != PLAYBACK_SAMPLE_RATE_HZ || audio.channels != PLAYBACK_CHANNELS {
@@ -103,7 +203,7 @@ impl MossSessions {
             });
         let input_lengths = Array1::from_vec(vec![to_i32(frames as i64)?]);
         let outputs = self
-            .codec_encode
+            .ensure_codec_encode(assets)?
             .run(ort::inputs![
                 "waveform" => TensorRef::from_array_view(waveform.view()).map_err(|e| MossTtsError::Inference { stage: "codec_encode", detail: e.to_string() })?,
                 "input_lengths" => TensorRef::from_array_view(input_lengths.view()).map_err(|e| MossTtsError::Inference { stage: "codec_encode", detail: e.to_string() })?
@@ -119,16 +219,33 @@ impl MossSessions {
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
-        _sampling_mode: MossSamplingMode,
+        sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
     ) -> Result<TtsResult, MossTtsError> {
         let total_started = Instant::now();
-        let generated_frames = self.generate_audio_frames(assets, request, generation_config)?;
+        let generated_frames =
+            self.generate_audio_frames(assets, request, sampling_mode, generation_config)?;
         let frame_count = generated_frames.len();
         let decode_started = Instant::now();
-        let result = self.decode_step_buffered(&generated_frames);
+        let result = self
+            .decode_full_audio(assets, &generated_frames)
+            .or_else(|full_error| {
+                log::warn!(
+                    target: "tts_moss::perf",
+                    "codec_decode_full failed; falling back to codec_decode_step: {}",
+                    full_error
+                );
+                self.decode_step_buffered(assets, &generated_frames).map_err(|step_error| {
+                    MossTtsError::Inference {
+                        stage: "codec_decode_step",
+                        detail: format!(
+                            "decode_full failed: {full_error}; decode_step fallback failed: {step_error}"
+                        ),
+                    }
+                })
+            });
         trace_moss_stage(
-            "codec_decode_step_buffered",
+            "codec_decode_full_or_step",
             decode_started,
             format_args!("frames={frame_count}"),
         );
@@ -150,7 +267,7 @@ impl MossSessions {
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
-        _sampling_mode: MossSamplingMode,
+        sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
         requested_chunk_ms: Option<u32>,
         mut on_pcm_chunk: F,
@@ -158,7 +275,7 @@ impl MossSessions {
     where
         F: FnMut(Vec<f32>, bool) -> Result<(), MossTtsError>,
     {
-        let mut state = self.codec_decode_step_state.clone();
+        let (_, mut state) = self.ensure_codec_decode_step(assets)?;
         let mut pending_frames: Vec<Vec<i64>> = Vec::new();
         let mut budget = FrameBudget::new(state.batch_size, requested_chunk_ms);
         let mut buffer = PcmChunkBuffer::default();
@@ -167,13 +284,14 @@ impl MossSessions {
         self.generate_audio_frames_with_callback(
             assets,
             request,
+            sampling_mode,
             generation_config,
             |sessions, frame| {
                 pending_frames.push(frame.to_vec());
                 if pending_frames.len() >= budget.next_batch_size(false) {
                     let frames = std::mem::take(&mut pending_frames);
                     let decode_started = Instant::now();
-                    let chunk = sessions.run_codec_decode_step_batch(&frames, &mut state)?;
+                    let chunk = sessions.run_codec_decode_step_batch(assets, &frames, &mut state)?;
                     trace_moss_stage(
                         "codec_decode_step_stream_batch",
                         decode_started,
@@ -192,7 +310,7 @@ impl MossSessions {
             let frames = pending_frames.drain(..take).collect::<Vec<_>>();
             let is_final = pending_frames.is_empty();
             let decode_started = Instant::now();
-            let chunk = self.run_codec_decode_step_batch(&frames, &mut state)?;
+            let chunk = self.run_codec_decode_step_batch(assets, &frames, &mut state)?;
             trace_moss_stage(
                 "codec_decode_step_stream_batch",
                 decode_started,
@@ -215,6 +333,7 @@ impl MossSessions {
 
     fn decode_step_buffered(
         &mut self,
+        assets: &MossAssets,
         audio_frames: &[Vec<i64>],
     ) -> Result<TtsResult, MossTtsError> {
         if audio_frames.is_empty() {
@@ -222,11 +341,11 @@ impl MossSessions {
                 "no audio frames to decode".to_string(),
             ));
         }
-        let mut state = self.codec_decode_step_state.clone();
+        let (_, mut state) = self.ensure_codec_decode_step(assets)?;
         let batch_size = state.batch_size;
         let mut buffer = PcmChunkBuffer::default();
         for batch in audio_frames.chunks(batch_size) {
-            let chunk = self.run_codec_decode_step_batch(batch, &mut state)?;
+            let chunk = self.run_codec_decode_step_batch(assets, batch, &mut state)?;
             buffer.push_chunk(chunk);
         }
         buffer.into_tts_result()
@@ -234,6 +353,7 @@ impl MossSessions {
 
     fn run_codec_decode_step_batch(
         &mut self,
+        assets: &MossAssets,
         audio_frames: &[Vec<i64>],
         state: &mut CodecDecodeStepState,
     ) -> Result<Vec<f32>, MossTtsError> {
@@ -294,7 +414,8 @@ impl MossSessions {
         }
 
         let outputs = self
-            .codec_decode_step
+            .ensure_codec_decode_step(assets)?
+            .0
             .run(inputs)
             .map_err(|e| MossTtsError::Inference {
                 stage: "codec_decode_step",
@@ -306,15 +427,57 @@ impl MossSessions {
         Ok(audio)
     }
 
+    fn decode_full_audio(
+        &mut self,
+        assets: &MossAssets,
+        audio_frames: &[Vec<i64>],
+    ) -> Result<TtsResult, MossTtsError> {
+        if audio_frames.is_empty() {
+            return Err(MossTtsError::Inference {
+                stage: "codec_decode_full",
+                detail: "no audio frames to decode".to_string(),
+            });
+        }
+        let frames = audio_frames.len();
+        let quantizers = audio_frames.first().map(Vec::len).unwrap_or(0);
+        let audio_codes = audio_frames
+            .iter()
+            .flatten()
+            .map(|value| to_i32(*value))
+            .collect::<Result<Vec<_>, _>>()?;
+        let codes =
+            Array3::from_shape_vec((1, frames, quantizers), audio_codes).map_err(|e| {
+                MossTtsError::Inference {
+                    stage: "codec_decode_full",
+                    detail: e.to_string(),
+                }
+            })?;
+        let lengths = Array1::from_vec(vec![to_i32(frames as i64)?]);
+        let outputs = self
+            .ensure_codec_decode_full(assets)?
+            .run(ort::inputs![
+                "audio_codes" => TensorRef::from_array_view(codes.view()).map_err(|e| MossTtsError::Inference { stage: "codec_decode_full", detail: e.to_string() })?,
+                "audio_code_lengths" => TensorRef::from_array_view(lengths.view()).map_err(|e| MossTtsError::Inference { stage: "codec_decode_full", detail: e.to_string() })?
+            ])
+            .map_err(|e| MossTtsError::Inference {
+                stage: "codec_decode_full",
+                detail: e.to_string(),
+            })?;
+        let samples = extract_codec_audio_chunk(&outputs, "codec_decode_full")?;
+        PcmChunkBuffer::from_chunk(samples).into_tts_result()
+    }
+
     fn generate_audio_frames(
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
+        sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
     ) -> Result<Vec<Vec<i64>>, MossTtsError> {
         self.generate_audio_frames_with_callback(
             assets,
             request,
+            sampling_mode,
             generation_config,
             |_sessions, _frame| Ok(()),
         )
@@ -324,6 +487,7 @@ impl MossSessions {
         &mut self,
         assets: &MossAssets,
         request: MossRequestRows,
+        sampling_mode: MossSamplingMode,
         generation_config: MossGenerationConfig,
         mut on_frame: F,
     ) -> Result<Vec<Vec<i64>>, MossTtsError>
@@ -359,7 +523,7 @@ impl MossSessions {
 
         let prefill_started = Instant::now();
         let mut outputs = self
-            .prefill
+            .ensure_prefill(assets)?
             .run(ort::inputs![
                 "input_ids" => TensorRef::from_array_view(input_ids.view()).map_err(|e| MossTtsError::Inference { stage: "tts_prefill", detail: e.to_string() })?,
                 "attention_mask" => TensorRef::from_array_view(attention_mask.view()).map_err(|e| MossTtsError::Inference { stage: "tts_prefill", detail: e.to_string() })?
@@ -387,16 +551,22 @@ impl MossSessions {
         let max_new_frames = generation_config.frame_limit(assets);
 
         for past_valid_length in (initial_past_valid_length..).take(max_new_frames) {
-            let fixed_started = Instant::now();
-            let fixed = self.run_local_fixed_sampled_frame(
-                &global_hidden,
-                &repetition_seen_mask,
-                &mut rng,
-                assets,
-            )?;
+            let sample_started = Instant::now();
+            let fixed = match sampling_mode {
+                MossSamplingMode::Fixed => self.run_local_fixed_sampled_frame(
+                    &global_hidden,
+                    &repetition_seen_mask,
+                    &mut rng,
+                    assets,
+                )?,
+                MossSamplingMode::Greedy => self.run_local_greedy_frame(&global_hidden, assets)?,
+            };
             trace_moss_stage(
-                "tts_local_fixed_sampled_frame",
-                fixed_started,
+                match sampling_mode {
+                    MossSamplingMode::Fixed => "tts_local_fixed_sampled_frame",
+                    MossSamplingMode::Greedy => "tts_local_decoder_greedy_frame",
+                },
+                sample_started,
                 format_args!("generated_frames={}", frames.len()),
             );
             if !fixed.should_continue {
@@ -470,7 +640,7 @@ impl MossSessions {
             })?;
 
         let outputs = self
-            .local_fixed_sampled_frame
+            .ensure_local_fixed_sampled_frame(assets)?
             .run(ort::inputs![
                 "global_hidden" => global_hidden,
                 "repetition_seen_mask" => TensorRef::from_array_view(repetition_seen_mask.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_fixed_sampled_frame", detail: e.to_string() })?,
@@ -490,6 +660,67 @@ impl MossSessions {
             });
         }
         Ok(GeneratedFrame { should_continue, frame })
+    }
+
+    fn run_local_greedy_frame(
+        &mut self,
+        global_hidden: &DynValue,
+        assets: &MossAssets,
+    ) -> Result<GeneratedFrame, MossTtsError> {
+        let n_vq = assets.n_vq();
+        let mut frame = Vec::with_capacity(n_vq);
+        let text_token_id = Array1::from_vec(vec![to_i32(
+            assets.manifest.tts_config.audio_assistant_slot_token_id,
+        )?]);
+        let empty_prefix = greedy_audio_prefix(&frame, assets)?;
+        let outputs = self
+            .ensure_local_decoder(assets)?
+            .run(ort::inputs![
+                "global_hidden" => global_hidden,
+                "text_token_id" => TensorRef::from_array_view(text_token_id.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_decoder", detail: e.to_string() })?,
+                "audio_prefix_token_ids" => TensorRef::from_array_view(empty_prefix.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_decoder", detail: e.to_string() })?
+            ])
+            .map_err(|e| MossTtsError::Inference {
+                stage: "tts_local_decoder",
+                detail: e.to_string(),
+            })?;
+        let assistant_token = argmax_i64_output(&outputs, "text_logits", "tts_local_decoder")?;
+        if assistant_token != assets.manifest.tts_config.audio_assistant_slot_token_id {
+            return Ok(GeneratedFrame {
+                should_continue: false,
+                frame,
+            });
+        }
+        let first_token = argmax_audio_logit(&outputs, "audio_logits", 0, "tts_local_decoder")?;
+        drop(outputs);
+        frame.push(first_token);
+
+        for channel in 1..n_vq {
+            let prefix = greedy_audio_prefix(&frame, assets)?;
+            let outputs = self
+                .ensure_local_decoder(assets)?
+                .run(ort::inputs![
+                    "global_hidden" => global_hidden,
+                    "text_token_id" => TensorRef::from_array_view(text_token_id.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_decoder", detail: e.to_string() })?,
+                    "audio_prefix_token_ids" => TensorRef::from_array_view(prefix.view()).map_err(|e| MossTtsError::Inference { stage: "tts_local_decoder", detail: e.to_string() })?
+                ])
+                .map_err(|e| MossTtsError::Inference {
+                    stage: "tts_local_decoder",
+                    detail: e.to_string(),
+                })?;
+            let token = argmax_audio_logit(
+                &outputs,
+                "audio_logits",
+                channel,
+                "tts_local_decoder",
+            )?;
+            drop(outputs);
+            frame.push(token);
+        }
+        Ok(GeneratedFrame {
+            should_continue: true,
+            frame,
+        })
     }
 
     fn run_decode_step<'a>(
@@ -520,7 +751,7 @@ impl MossSessions {
         for (name, value) in decode_past {
             inputs.push((name.into(), SessionInputValue::from(value)));
         }
-        self.decode_step.run(inputs).map_err(|e| MossTtsError::Inference {
+        self.ensure_decode_step(assets)?.run(inputs).map_err(|e| MossTtsError::Inference {
             stage: "tts_decode_step",
             detail: e.to_string(),
         })
@@ -912,6 +1143,51 @@ fn validate_required_model_files(
     Ok(resolved)
 }
 
+fn validate_model_files(
+    base_dir: &Path,
+    prefix: &'static str,
+    files: &HashMap<String, String>,
+    external_data_files: &HashMap<String, Vec<String>>,
+    required_keys: &[&str],
+    optional_keys: &[&str],
+) -> Result<HashMap<String, PathBuf>, MossTtsError> {
+    let mut resolved = validate_required_model_files(
+        base_dir,
+        prefix,
+        files,
+        external_data_files,
+        required_keys,
+    )?;
+    for key in optional_keys {
+        let Some(raw_path) = files.get(*key) else {
+            continue;
+        };
+        let path = resolve_manifest_path(base_dir, &format!("{prefix}.files.{key}"), raw_path)?;
+        if !path.is_file() {
+            continue;
+        }
+        if let Some(external_files) = external_data_files.get(raw_path) {
+            let mut all_external_present = true;
+            for external in external_files {
+                let external_path = resolve_manifest_path(
+                    base_dir,
+                    &format!("{prefix}.external_data_files.{raw_path}"),
+                    external,
+                )?;
+                if !external_path.is_file() {
+                    all_external_present = false;
+                    break;
+                }
+            }
+            if !all_external_present {
+                continue;
+            }
+        }
+        resolved.insert((*key).to_string(), path);
+    }
+    Ok(resolved)
+}
+
 fn resolve_manifest_path(base_dir: &Path, field: &str, raw: &str) -> Result<PathBuf, MossTtsError> {
     let path = Path::new(raw);
     if path.is_absolute() || path.components().any(|c| matches!(c, Component::Prefix(_))) {
@@ -1154,6 +1430,106 @@ fn extract_first_i64(
             stage,
             detail: format!("output '{name}' is empty"),
         })
+}
+
+fn argmax_i64_output(
+    outputs: &ort::session::SessionOutputs<'_>,
+    name: &str,
+    stage: &'static str,
+) -> Result<i64, MossTtsError> {
+    let value = outputs
+        .get(name)
+        .ok_or_else(|| MossTtsError::Inference {
+            stage,
+            detail: format!("missing output '{name}'"),
+        })?;
+    let (_, data) = value.try_extract_tensor::<f32>().map_err(|e| MossTtsError::Inference {
+        stage,
+        detail: e.to_string(),
+    })?;
+    data.iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(index, _)| index as i64)
+        .ok_or_else(|| MossTtsError::Inference {
+            stage,
+            detail: format!("output '{name}' is empty"),
+        })
+}
+
+fn argmax_audio_logit(
+    outputs: &ort::session::SessionOutputs<'_>,
+    name: &str,
+    channel: usize,
+    stage: &'static str,
+) -> Result<i64, MossTtsError> {
+    let value = outputs
+        .get(name)
+        .ok_or_else(|| MossTtsError::Inference {
+            stage,
+            detail: format!("missing output '{name}'"),
+        })?;
+    let (shape, data) = value.try_extract_tensor::<f32>().map_err(|e| MossTtsError::Inference {
+        stage,
+        detail: e.to_string(),
+    })?;
+    let (channels, vocab) = match shape.as_ref() {
+        [vocab] => (1usize, *vocab as usize),
+        [1, vocab] => (1usize, *vocab as usize),
+        [channels, vocab] => (*channels as usize, *vocab as usize),
+        [1, channels, vocab] => (*channels as usize, *vocab as usize),
+        other => {
+            return Err(MossTtsError::Inference {
+                stage,
+                detail: format!("unexpected output '{name}' shape {other:?}"),
+            })
+        }
+    };
+    if vocab == 0 || data.is_empty() {
+        return Err(MossTtsError::Inference {
+            stage,
+            detail: format!("output '{name}' is empty"),
+        });
+    }
+    let channel_index = if channels == 1 { 0 } else { channel };
+    let start = channel_index.checked_mul(vocab).ok_or_else(|| MossTtsError::Inference {
+        stage,
+        detail: "audio logits offset overflowed".to_string(),
+    })?;
+    let end = start.checked_add(vocab).ok_or_else(|| MossTtsError::Inference {
+        stage,
+        detail: "audio logits range overflowed".to_string(),
+    })?;
+    let logits = data.get(start..end).ok_or_else(|| MossTtsError::Inference {
+        stage,
+        detail: format!(
+            "output '{name}' does not contain channel {channel} logits for shape {shape:?}"
+        ),
+    })?;
+    logits
+        .iter()
+        .enumerate()
+        .max_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(index, _)| index as i64)
+        .ok_or_else(|| MossTtsError::Inference {
+            stage,
+            detail: format!("output '{name}' channel {channel} is empty"),
+        })
+}
+
+fn greedy_audio_prefix(
+    frame: &[i64],
+    assets: &MossAssets,
+) -> Result<Array2<i32>, MossTtsError> {
+    let prefix_len = assets.n_vq().saturating_sub(1);
+    let mut prefix = vec![to_i32(assets.manifest.tts_config.audio_pad_token_id)?; prefix_len];
+    for (index, token) in frame.iter().take(prefix_len).enumerate() {
+        prefix[index] = to_i32(*token)?;
+    }
+    Array2::from_shape_vec((1, prefix_len), prefix).map_err(|e| MossTtsError::Inference {
+        stage: "tts_local_decoder",
+        detail: e.to_string(),
+    })
 }
 
 struct SimpleRng {

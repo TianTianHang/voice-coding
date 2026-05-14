@@ -43,19 +43,21 @@ impl MossAssets {
         let codec_meta: CodecMeta = read_json(&codec_meta_path)?;
         validate_meta_consistency(&manifest, &tts_meta, &codec_meta)?;
 
-        let tts_files = validate_required_model_files(
+        let tts_files = validate_model_files(
             tts_meta_path.parent().unwrap_or_else(|| Path::new("")),
             "tts",
             &tts_meta.files,
             &tts_meta.external_data_files,
             &["prefill", "decode_step", "local_fixed_sampled_frame"],
+            &["local_decoder"],
         )?;
-        let codec_files = validate_required_model_files(
+        let codec_files = validate_model_files(
             codec_meta_path.parent().unwrap_or_else(|| Path::new("")),
             "codec",
             &codec_meta.files,
             &codec_meta.external_data_files,
-            &["encode", "decode_step"],
+            &["decode_step"],
+            &["encode", "decode_full"],
         )?;
 
         Ok(Self {

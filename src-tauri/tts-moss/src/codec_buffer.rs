@@ -4,6 +4,12 @@ struct PcmChunkBuffer {
 }
 
 impl PcmChunkBuffer {
+    fn from_chunk(samples: Vec<f32>) -> Self {
+        let mut buffer = Self::default();
+        buffer.push_chunk(samples);
+        buffer
+    }
+
     fn push_chunk(&mut self, samples: Vec<f32>) {
         if !samples.is_empty() {
             self.chunks.push(samples);

@@ -185,7 +185,6 @@ impl TtsEngine for MossOnnxTtsEngine {
     }
 
     async fn health_check(&self) -> tts_core::Result<bool> {
-        let assets = self.assets.clone();
         let sessions = Arc::clone(&self.sessions);
         tokio::task::spawn_blocking(move || {
             let mut sessions = sessions.lock().map_err(|e| MossTtsError::Inference {
@@ -193,7 +192,7 @@ impl TtsEngine for MossOnnxTtsEngine {
                 detail: e.to_string(),
             })?;
             if sessions.is_none() {
-                *sessions = Some(MossSessions::load(&assets)?);
+                *sessions = Some(MossSessions::new());
             }
             Ok::<(), MossTtsError>(())
         })
@@ -215,14 +214,14 @@ fn synthesize_prepared_with_sessions(
         detail: e.to_string(),
     })?;
     if sessions.is_none() {
-        *sessions = Some(MossSessions::load(&prepared.assets)?);
+        *sessions = Some(MossSessions::new());
     }
     let sessions = sessions.as_mut().ok_or_else(|| MossTtsError::Inference {
         stage: "session_init",
         detail: "MOSS sessions were not initialized".to_string(),
     })?;
     let prompt_audio_codes = if let Some(reference_audio) = prepared.reference_audio {
-        sessions.encode_reference_audio(reference_audio)?
+        sessions.encode_reference_audio(&prepared.assets, reference_audio)?
     } else {
         prepared.prompt_audio_codes
     };

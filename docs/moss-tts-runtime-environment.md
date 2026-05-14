@@ -7,17 +7,19 @@
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `VOICE_CODING_MODEL_HOME` | `models` | 推荐的本地模型根目录。TTS 标准布局为 `$VOICE_CODING_MODEL_HOME/tts/moss-tts-nano-100m-onnx/`。 |
-| `MOSS_TTS_MODEL_DIR` | `../models/moss-tts/MOSS-TTS-Nano-100M-ONNX` | 兼容入口，必须指向直接的 `MOSS-TTS-Nano-100M-ONNX` 组件目录。真实推理测试要求显式设置该变量。 |
+| `MOSS_TTS_MODEL_DIR` | 从 `VOICE_CODING_MODEL_HOME` 推断，最终回退到 `../models/moss-tts/MOSS-TTS-Nano-100M-ONNX` | 兼容入口；设置时必须指向直接的 `MOSS-TTS-Nano-100M-ONNX` 组件目录。未设置时，crate 级测试会使用 `$VOICE_CODING_MODEL_HOME/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX`。 |
 
-当前 Rust 版 MOSS TTS 只加载 fixed 生成路径需要的 ONNX sessions：
+当前 Rust 版 MOSS TTS 使用按需加载策略，`health_check` 不预加载 ONNX sessions。首次使用对应能力时才创建 session：
 
 - `tts.prefill`
 - `tts.decode_step`
 - `tts.local_fixed_sampled_frame`
+- `tts.local_decoder`
 - `codec.encode`
+- `codec.decode_full`
 - `codec.decode_step`
 
-不再加载 `tts.local_decoder`、`tts.local_cached_step` 或 `codec.decode_full`。
+默认 `samplingMode` 是 `fixed`。设置为 `greedy` 时会加载 `tts.local_decoder` 并执行确定性 argmax frame 生成。非流式 `synthesize` 优先使用 `codec.decode_full`，失败或缺失时回退到 `codec.decode_step`；外部流式合成始终使用 `codec.decode_step`。
 
 ## ORT 线程与执行策略
 
@@ -26,7 +28,7 @@
 | `MOSS_TTS_INTRA_THREADS` | `4` | ORT intra-op 线程数，影响单个算子内部并行。 |
 | `MOSS_TTS_INTER_THREADS` | `1` | ORT inter-op 线程数。仅在 parallel execution 下对可并行图分支有意义。 |
 | `MOSS_TTS_PARALLEL_EXECUTION` | `false` | 设为 `1/true/yes/on` 时启用 ORT parallel execution。 |
-| `MOSS_TTS_MEMORY_PATTERN` | `true` | 控制 ORT memory pattern 优化。输入形状高度变化时可尝试关闭。 |
+| `MOSS_TTS_MEMORY_PATTERN` | `true` | 控制 ORT memory pattern 优化。该设置对每个懒加载 session 分别生效；输入形状高度变化时可尝试关闭。 |
 
 布尔变量接受 `1/true/yes/on` 和 `0/false/no/off`。
 
@@ -34,7 +36,7 @@
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `MOSS_TTS_TRACE` | 关闭 | 设为 true 时把项目级阶段耗时打印到 stderr，例如 `tts_prefill`、`tts_decode_step`、`codec_decode_step_buffered`。 |
+| `MOSS_TTS_TRACE` | 关闭 | 设为 true 时把项目级阶段耗时打印到 stderr，例如 `tts_prefill`、`tts_decode_step`、`codec_decode_full_or_step`、`codec_decode_step_stream_batch`。 |
 
 项目级 trace 是粗粒度计时，适合快速看端到端阶段耗时；它不是 ORT kernel profiler。
 
@@ -51,7 +53,6 @@
 nix develop -c env \
   MOSS_TTS_ORT_PROFILE=1 \
   MOSS_TTS_ORT_PROFILE_DIR=/tmp/moss-ort-profiles \
-  MOSS_TTS_MODEL_DIR=/home/tiantian/project/voice-coding/models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX \
   cargo test -p tts-moss --test inference synthesizes_playback_ready_audio -- --ignored --nocapture --exact
 ```
 

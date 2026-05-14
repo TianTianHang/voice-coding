@@ -4,7 +4,16 @@ use tts_core::{
     MossTtsConfig, PcmData, TtsConfig, TtsEngine, TtsStreamConfig, TtsSynthesisEvent,
     PLAYBACK_CHANNELS, PLAYBACK_SAMPLE_RATE_HZ,
 };
-use tts_moss::MossOnnxTtsEngine;
+use tts_moss::{MossModelConfig, MossOnnxTtsEngine};
+
+fn inference_engine() -> MossOnnxTtsEngine {
+    let config = MossModelConfig::from_env();
+    eprintln!("MOSS TTS model_dir={}", config.model_dir.display());
+    MossOnnxTtsEngine::new(config).expect(
+        "MOSS engine should initialize; set MOSS_TTS_MODEL_DIR to the component directory or \
+         VOICE_CODING_MODEL_HOME to the model root",
+    )
+}
 
 fn write_wav(path: &Path, result: &tts_core::TtsResult) -> hound::Result<()> {
     let spec = hound::WavSpec {
@@ -33,10 +42,6 @@ fn write_wav(path: &Path, result: &tts_core::TtsResult) -> hound::Result<()> {
 #[tokio::test]
 #[ignore = "requires downloaded MOSS ONNX model assets and measures local realtime streaming performance"]
 async fn streaming_synthesis_is_realtime_on_this_machine() {
-    let model_dir = std::env::var("MOSS_TTS_MODEL_DIR")
-        .expect("set MOSS_TTS_MODEL_DIR to MOSS-TTS-Nano-100M-ONNX before running this test");
-    eprintln!("MOSS_TTS_MODEL_DIR={model_dir}");
-
     let text = std::env::var("MOSS_TTS_PERF_TEXT")
         .unwrap_or_else(|_| "你好，当前测试用于确认本机是否支持实时语音合成播放。".to_string());
     let max_rtf = std::env::var("MOSS_TTS_REALTIME_MAX_RTF")
@@ -54,7 +59,7 @@ async fn streaming_synthesis_is_realtime_on_this_machine() {
     let warmup_text =
         std::env::var("MOSS_TTS_PERF_WARMUP_TEXT").unwrap_or_else(|_| "预热。".to_string());
 
-    let engine = MossOnnxTtsEngine::from_env().expect("MOSS engine should initialize");
+    let engine = inference_engine();
     assert!(engine
         .health_check()
         .await
@@ -167,11 +172,7 @@ fn audio_duration_sec_counts_pcm_frames_not_interleaved_samples() {
 #[tokio::test]
 #[ignore = "requires downloaded MOSS ONNX model assets and validates streaming codec decode"]
 async fn synthesizes_playback_ready_audio_with_fixed_streaming_decode() {
-    let model_dir = std::env::var("MOSS_TTS_MODEL_DIR")
-        .expect("set MOSS_TTS_MODEL_DIR to MOSS-TTS-Nano-100M-ONNX before running this test");
-    eprintln!("MOSS_TTS_MODEL_DIR={model_dir}");
-
-    let engine = MossOnnxTtsEngine::from_env().expect("MOSS engine should initialize");
+    let engine = inference_engine();
     assert!(engine
         .health_check()
         .await
@@ -206,14 +207,85 @@ async fn synthesizes_playback_ready_audio_with_fixed_streaming_decode() {
 }
 
 #[tokio::test]
+#[ignore = "requires downloaded MOSS ONNX model assets and validates greedy full decode"]
+async fn synthesizes_playback_ready_audio_with_greedy_full_decode() {
+    let engine = inference_engine();
+    assert!(engine
+        .health_check()
+        .await
+        .expect("health check should pass"));
+
+    let config = TtsConfig {
+        moss: Some(MossTtsConfig {
+            sampling_mode: Some("greedy".to_string()),
+            max_new_frames: Some(12),
+            ..MossTtsConfig::default()
+        }),
+        ..TtsConfig::default()
+    };
+    let result = engine
+        .synthesize("Greedy decode test.", config.clone())
+        .await
+        .expect("MOSS greedy synthesis with full decode should succeed");
+    let repeated = engine
+        .synthesize("Greedy decode test.", config)
+        .await
+        .expect("MOSS greedy synthesis should be reproducible");
+
+    result
+        .validate_for_playback()
+        .expect("synthesized audio must satisfy playback contract");
+    assert_eq!(result.audio.sample_rate_hz, PLAYBACK_SAMPLE_RATE_HZ);
+    assert_eq!(result.audio.channels, PLAYBACK_CHANNELS);
+    assert!(result.audio.pcm.len_frames(result.audio.channels) > 0);
+    assert_eq!(result.audio.pcm.len_frames(result.audio.channels), repeated.audio.pcm.len_frames(repeated.audio.channels));
+}
+
+#[tokio::test]
+#[ignore = "requires downloaded MOSS ONNX model assets and validates greedy streaming decode"]
+async fn streaming_synthesis_with_greedy_emits_audio_chunks() {
+    let engine = inference_engine();
+    assert!(engine
+        .health_check()
+        .await
+        .expect("health check should pass"));
+
+    let mut chunks = 0usize;
+    let result = engine
+        .synthesize_stream_events(
+            "Greedy streaming test.",
+            TtsConfig {
+                stream: Some(TtsStreamConfig {
+                    audio_chunk_ms: Some(120),
+                    ..TtsStreamConfig::default()
+                }),
+                moss: Some(MossTtsConfig {
+                    sampling_mode: Some("greedy".to_string()),
+                    max_new_frames: Some(12),
+                    ..MossTtsConfig::default()
+                }),
+                ..TtsConfig::default()
+            },
+            Box::new(|event| {
+                if let TtsSynthesisEvent::AudioChunk(_) = event {
+                    chunks += 1;
+                }
+            }),
+        )
+        .await
+        .expect("MOSS greedy streaming synthesis should succeed");
+
+    result
+        .validate_for_playback()
+        .expect("synthesized audio must satisfy playback contract");
+    assert!(chunks > 0, "greedy streaming should emit audio chunks");
+}
+
+#[tokio::test]
 #[ignore = "requires downloaded MOSS ONNX model assets and runs full inference"]
 async fn synthesizes_playback_ready_audio() {
-    let model_dir = std::env::var("MOSS_TTS_MODEL_DIR")
-        .expect("set MOSS_TTS_MODEL_DIR to MOSS-TTS-Nano-100M-ONNX before running this test");
-    eprintln!("MOSS_TTS_MODEL_DIR={model_dir}");
-
     let started = Instant::now();
-    let engine = MossOnnxTtsEngine::from_env().expect("MOSS engine should initialize");
+    let engine = inference_engine();
     assert_eq!(engine.engine_name(), "moss-onnx-tts");
     assert!(engine
         .health_check()

@@ -21,7 +21,7 @@ pub enum MossTtsError {
     #[error("unknown MOSS voice '{voice}'. Available voices include: {available}")]
     UnknownVoice { voice: String, available: String },
 
-    #[error("unknown MOSS sampling mode '{mode}'. Available modes: fixed")]
+    #[error("unknown MOSS sampling mode '{mode}'. Available modes: fixed, greedy")]
     UnknownSamplingMode { mode: String },
 
     #[error("MOSS output format error: {0}")]

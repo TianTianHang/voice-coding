@@ -41,8 +41,11 @@ include!("metadata.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
     use tempfile::TempDir;
     use tts_core::MossTtsConfig;
+
+    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
 
     #[test]
     fn loads_valid_asset_layout() {
@@ -151,6 +154,39 @@ mod tests {
     }
 
     #[test]
+    fn model_config_from_env_accepts_model_home_and_preserves_engine_override() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let original_model_dir = std::env::var_os("MOSS_TTS_MODEL_DIR");
+        let original_model_home = std::env::var_os("VOICE_CODING_MODEL_HOME");
+
+        std::env::remove_var("MOSS_TTS_MODEL_DIR");
+        std::env::set_var("VOICE_CODING_MODEL_HOME", "/tmp/voice-models");
+        assert_eq!(
+            MossModelConfig::from_env().model_dir,
+            PathBuf::from(
+                "/tmp/voice-models/tts/moss-tts-nano-100m-onnx/MOSS-TTS-Nano-100M-ONNX"
+            )
+        );
+
+        std::env::set_var("MOSS_TTS_MODEL_DIR", "/tmp/direct-moss-component");
+        assert_eq!(
+            MossModelConfig::from_env().model_dir,
+            PathBuf::from("/tmp/direct-moss-component")
+        );
+
+        restore_env_var("MOSS_TTS_MODEL_DIR", original_model_dir);
+        restore_env_var("VOICE_CODING_MODEL_HOME", original_model_home);
+    }
+
+    fn restore_env_var(name: &str, value: Option<std::ffi::OsString>) {
+        if let Some(value) = value {
+            std::env::set_var(name, value);
+        } else {
+            std::env::remove_var(name);
+        }
+    }
+
+    #[test]
     fn sampling_mode_defaults_to_fixed() {
         assert_eq!(
             MossSamplingMode::from_config(&TtsConfig::default()).unwrap(),
@@ -159,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn sampling_mode_accepts_only_fixed() {
+    fn sampling_mode_accepts_fixed_and_greedy() {
         let fixed = TtsConfig {
             moss: Some(MossTtsConfig {
                 sampling_mode: Some("fixed".to_string()),
@@ -171,6 +207,19 @@ mod tests {
         assert_eq!(
             MossSamplingMode::from_config(&fixed).unwrap(),
             MossSamplingMode::Fixed
+        );
+
+        let greedy = TtsConfig {
+            moss: Some(MossTtsConfig {
+                sampling_mode: Some("greedy".to_string()),
+                ..MossTtsConfig::default()
+            }),
+            ..TtsConfig::default()
+        };
+
+        assert_eq!(
+            MossSamplingMode::from_config(&greedy).unwrap(),
+            MossSamplingMode::Greedy
         );
     }
 
@@ -189,6 +238,7 @@ mod tests {
         assert!(matches!(err, MossTtsError::UnknownSamplingMode { .. }));
         assert!(err.to_string().contains("creative"));
         assert!(err.to_string().contains("fixed"));
+        assert!(err.to_string().contains("greedy"));
     }
 
     #[test]
@@ -401,15 +451,33 @@ mod tests {
     }
 
     #[test]
-    fn streaming_codec_decode_is_the_only_output_path() {
+    fn optional_full_and_greedy_assets_are_recorded_when_present() {
         let fixture = MossFixture::new();
+        std::fs::write(fixture.tts_dir.join("local_decoder.onnx"), "").unwrap();
+        std::fs::write(fixture.codec_dir.join("decode_full.onnx"), "").unwrap();
         let assets = MossAssets::load(MossModelConfig {
             model_dir: fixture.tts_dir,
         })
         .unwrap();
 
         assert!(assets.codec_files.contains_key("decode_step"));
+        assert!(assets.codec_files.contains_key("decode_full"));
+        assert!(assets.tts_files.contains_key("local_decoder"));
+    }
+
+    #[test]
+    fn optional_encode_full_and_greedy_assets_may_be_missing() {
+        let fixture = MossFixture::new();
+        std::fs::remove_file(fixture.codec_dir.join("encode.onnx")).unwrap();
+        let assets = MossAssets::load(MossModelConfig {
+            model_dir: fixture.tts_dir,
+        })
+        .unwrap();
+
+        assert!(assets.codec_files.contains_key("decode_step"));
+        assert!(!assets.codec_files.contains_key("encode"));
         assert!(!assets.codec_files.contains_key("decode_full"));
+        assert!(!assets.tts_files.contains_key("local_decoder"));
     }
 
     #[test]
@@ -894,6 +962,7 @@ mod tests {
   "files": {
     "prefill": "prefill.onnx",
     "decode_step": "decode_step.onnx",
+    "local_decoder": "local_decoder.onnx",
     "local_fixed_sampled_frame": "local_fixed_sampled_frame.onnx"
   },
   "external_data_files": {
@@ -1001,7 +1070,7 @@ mod tests {
                 format!(
                     r#"{{
   "format_version": 2,
-  "files": {{ "encode": "encode.onnx", "decode_step": "decode_step.onnx" }},
+  "files": {{ "encode": "encode.onnx", "decode_full": "decode_full.onnx", "decode_step": "decode_step.onnx" }},
   "external_data_files": {{
     "encode.onnx": ["codec_shared.data"],
     "decode_step.onnx": ["codec_shared.data"]
